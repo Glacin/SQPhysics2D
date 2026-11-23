@@ -629,21 +629,26 @@ bool sweep_shape_pair_toi(const detail::ShapeQueryView& shape_a, Vec2 position_a
         *out_root_iterations = result.root_iterations;
     if (out_failed)
         *out_failed = result.state == ConvexToiState::Failed;
+
+    const bool polygon_pair = std::holds_alternative<ConvexPoly>(shape_a.geometry()) &&
+                              std::holds_alternative<ConvexPoly>(shape_b.geometry());
+    const bool check_polygon_start = polygon_pair && target_penetration_m == real(0);
+    Vec2 start_normal_ab;
+    // GJK can report a small positive gap inside a shallow SAT overlap.
+    if ((check_polygon_start || result.state == ConvexToiState::InitialOverlap) &&
+        sweep.overlaps(real(0), &start_normal_ab)) {
+        out_toi = real(0);
+        out_normal = -start_normal_ab;
+        return true;
+    }
+
     if (result.state == ConvexToiState::Hit || result.state == ConvexToiState::InitialOverlap ||
         (result.state == ConvexToiState::Failed && result.fraction < real(1))) {
         out_toi = result.fraction;
         out_normal = result.normal;
-        if (result.state == ConvexToiState::InitialOverlap) {
-            Vec2 normal_ab;
-            if (sweep.overlaps(real(0), &normal_ab))
-                out_normal = -normal_ab;
-        }
-        if (result.state != ConvexToiState::InitialOverlap &&
-            std::holds_alternative<ConvexPoly>(shape_a.geometry()) &&
-            std::holds_alternative<ConvexPoly>(shape_b.geometry())) {
-            Vec2 manifold_normal;
-            const bool starts_overlapped = sweep.overlaps(real(0));
-            if (!starts_overlapped) {
+        if (result.state != ConvexToiState::InitialOverlap && polygon_pair) {
+            if (check_polygon_start || !sweep.overlaps(real(0))) {
+                Vec2 manifold_normal;
                 real lower = real(0), upper = out_toi;
                 bool bracketed = sweep.overlaps(upper, &manifold_normal);
                 if (!bracketed) {

@@ -1,6 +1,7 @@
 #include "world/world_stages.h"
 
 #include <catch_amalgamated.hpp>
+#include <algorithm>
 #include <limits>
 
 namespace {
@@ -820,4 +821,91 @@ TEST_CASE("rotating rigid circle keeps its arc against a polygon", "[world][narr
     REQUIRE(state.narrow_phase.toi_pairs.size() == 1);
     CHECK(state.narrow_phase.toi_times[0] > sqp::config::TU_PER_SECOND / 3);
     CHECK(state.narrow_phase.toi_times[0] < 2 * sqp::config::TU_PER_SECOND / 3);
+}
+
+TEST_CASE("A separating polygon overlap only schedules a later reentry",
+          "[world][narrow_phase][ccd][toi]") {
+    using namespace sqp;
+    World world;
+    auto& state = world.state();
+    const auto apply = [&](CommandId id) {
+        REQUIRE(world.step(0));
+        CommandResult result;
+        REQUIRE(world.take_command_result(id, result));
+        REQUIRE(result.status == CommandStatus::Applied);
+        return result;
+    };
+
+    PhysicsSettings settings;
+    settings.gravity = {};
+    settings.contact.enable_dynamic_restitution = false;
+    apply(world.set_settings(0, settings));
+    PhysicsMaterial material;
+    material.base_restitution = 1;
+    material.restitution_flags = RESTITUTION_DISABLE_IMPACT_SCALING;
+    material.dynamic_friction = 0;
+    material.static_friction = 0;
+    REQUIRE(state.shape_pool.materials().set(0, material));
+
+    const auto add_polygon = [&](RigidBodyDef definition, PolygonVertices vertices) {
+        definition.configs.event_flags = BodyConfigs::EventFlags::AfterSolve;
+        const BodyHandle body = apply(world.create_rigid(0, definition)).body;
+        PolygonShapeDef shape_definition;
+        shape_definition.vertices = vertices;
+        const ShapeHandle shape = apply(world.create_polygon_shape(0, shape_definition, body)).shape;
+        return std::pair{body, shape};
+    };
+
+    // A single shape pair captured from convex_polygon_bounce at the start of tick 25.
+    const auto [a, shape_a] = add_polygon(
+        {{real(106.711311), real(301.390808)}, real(3.90256667),
+         {real(-174.57962), real(66.1810532)}, real(35.22995)},
+        {{real(4.3065505), real(-0.884600282)}, {real(0.904233098), real(3.59282064)},
+         {real(-2.87375498), real(5.36477518)}, {real(-4.18250799), real(3.09694529)},
+         {real(-2.03651142), real(-1.5029496)}, {real(1.94825828), real(-4.97109175)},
+         {real(4.77118444), real(-4.69590044)}});
+    const auto [b, shape_b] = add_polygon(
+        {{real(97.5796509), real(302.865936)}, real(3.69407368),
+         {real(-64.4238129), real(2.88470459)}, real(49.70401)},
+        {{real(-0.164832965), real(2.81921315)}, {real(-3.76828098), real(1.68025732)},
+         {real(-4.53413677), real(-0.723966122)}, {real(-1.88569593), real(-2.58302855)},
+         {real(2.18271446), real(-2.49701762)}, {real(4.60749483), real(-0.530700028)},
+         {real(3.56273794), real(1.8352437)}});
+
+    SECTION("TOI is delayed until after separation") {
+        clear_outputs(state);
+        state.broad_phase.bodies = {a, b};
+        state.broad_phase.shapes = {shape_a, shape_b};
+        state.broad_phase.candidates = {{0, 1}};
+        state.interval.target_end = config::TU_PER_TICK;
+        REQUIRE(run_narrow_phase(state));
+        REQUIRE(state.narrow_phase.toi_times.size() == 1);
+        const tick_t impact_time = state.narrow_phase.toi_times.front();
+        CHECK(impact_time > config::TU_PER_TICK * 44 / 100);
+        CHECK(impact_time < config::TU_PER_TICK * 47 / 100);
+
+        clear_outputs(state);
+        state.broad_phase.candidates = {{0, 1}};
+        state.interval.target_end = config::TU_PER_TICK / 4;
+        REQUIRE(state.body_pool.set_ccd_override(a, BodyConfigs::CcdOverride::Shapecast));
+        REQUIRE(run_narrow_phase(state));
+        CHECK(state.narrow_phase.toi_times.empty());
+    }
+
+    SECTION("World step applies the reentry impulse without freezing either body") {
+        real largest_impulse = 0;
+        const auto record_impulse = [](PhysicsEvent& event, void* data) {
+            const auto& report = std::get<PostSolveEvent>(event.event).report;
+            auto& largest = *static_cast<real*>(data);
+            largest = std::max(largest, report.normal_impulse);
+        };
+        apply(world.set_after_solve_callback(0, record_impulse, &largest_impulse));
+        REQUIRE(world.step(config::TU_PER_TICK));
+        CHECK(largest_impulse > real(400));
+        for (const auto body : {a, b}) {
+            const auto island = state.body_pool.island_of(body);
+            REQUIRE(island);
+            CHECK(state.island_pool.last_frozen_until(*island) == 0);
+        }
+    }
 }
