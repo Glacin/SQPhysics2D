@@ -134,6 +134,13 @@ struct WorldState {
 #endif
         };
         u64 intervals = 0;
+        struct BodyFreeze {
+            BodyHandle body;
+            tick_t start = 0, end = 0;
+            bool exhausted = false;
+        };
+        bool record_body_freezes = false;
+        std::vector<BodyFreeze> body_freezes;
         std::array<Entry, stage_count> stages{};
 #ifdef SQP_ENABLE_PERFORMANCE_PROFILING
         u64 pending_candidates = 0;

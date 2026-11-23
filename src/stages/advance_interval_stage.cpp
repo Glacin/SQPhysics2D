@@ -9,7 +9,7 @@
 
 namespace sqp {
 
-bool freeze_island_until_next_tick(WorldState& state, IslandId id, tick_t now) {
+bool freeze_island_until_next_tick(WorldState& state, IslandId id, tick_t now, bool exhausted) {
     const Island* island = state.island_pool.get(id);
     if (!island)
         return stage_error(state, "freeze_island_until_next_tick: island does not exist");
@@ -22,6 +22,7 @@ bool freeze_island_until_next_tick(WorldState& state, IslandId id, tick_t now) {
     if (now > std::numeric_limits<tick_t>::max() - offset)
         return stage_error(state, "next tick time would overflow");
     const tick_t until = now + offset;
+    const tick_t start = island->time;
     if (!state.island_pool.set_time(id, until) ||
         !state.island_pool.set_frozen_until(id, until))
         return stage_error(state, "freeze_island_until_next_tick: check failed (!state.island_pool.set_time(id, until) || !state.island_pool.set_frozen_until(id, until))");
@@ -33,6 +34,8 @@ bool freeze_island_until_next_tick(WorldState& state, IslandId id, tick_t now) {
         if (*dense >= versions.size())
             return stage_error(state, "freeze_island_until_next_tick: check failed (*dense >= versions.size())");
         ++versions[*dense];
+        if (state.stats.record_body_freezes && start < until)
+            state.stats.body_freezes.push_back({body, start, until, exhausted});
         return true;
     };
     if (const auto* small = std::get_if<Island::SmallIsland>(&island->bodies)) {
@@ -73,7 +76,7 @@ bool run_advance_interval(WorldState& state) {
             if (processed.received_toi_impulse && state.island_pool.get(id) &&
                 state.island_pool.toi_truncations(id) >=
                     state.settings.interval.max_truncations_per_tick &&
-                !freeze_island_until_next_tick(state, id, schedule.time))
+                !freeze_island_until_next_tick(state, id, schedule.time, /*exhausted=*/true))
                 return stage_error(state, "run_advance_interval: failed to freeze exhausted island");
         }
         clear_active_interval_data(state);

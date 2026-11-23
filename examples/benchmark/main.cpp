@@ -9,8 +9,10 @@
 #include <cmath>
 #include <exception>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 
 #ifdef _WIN32
 #include <io.h>
@@ -53,7 +55,7 @@ void usage() {
     std::fprintf(stderr, "usage: sqphysics2d_benchmark SCENARIO [--bodies N] [--seed N] "
                          "[--warmup N] [--ticks N] [--sleep on|off] "
                          "[--initial-sleep on|off] [--awake-bodies N] "
-                         "[--proxy-extension-ratio 0..1] [--detail] [--check-determinism]\n"
+                         "[--proxy-extension-ratio 0..1] [--detail] [--freeze-stats] [--check-determinism]\n"
                          "scenarios: box_free_motion, box_floor_sleep, aabb_box_pyramid, "
                          "rigid_box_pyramid, circle_box_bounce, convex_polygon_bounce, "
                          "mixed_shape_bounce\n"
@@ -74,6 +76,50 @@ bool color_output() {
 #endif
 }
 #endif
+
+void print_freeze_stats(std::span<const sqp::WorldState::StageStats::BodyFreeze> freezes) {
+    using BodyKey = std::tuple<sqp::BodyConfigs::Kind, sqp::u32, sqp::u32>;
+    struct Summary {
+        std::map<BodyKey, sqp::tick_t> by_body;
+
+        void print(const char* name) const {
+            sqp::tick_t maximum = 0;
+            long double total = 0;
+            BodyKey max_body{};
+            for (const auto& [body, skipped] : by_body) {
+                total += skipped;
+                if (skipped > maximum) {
+                    maximum = skipped;
+                    max_body = body;
+                }
+            }
+            const long double average = by_body.empty() ? 0 : total / by_body.size();
+            constexpr long double ms_per_tu = 1000.0L / sqp::config::TU_PER_SECOND;
+            std::printf("%s_bodies=%zu average_skipped_tu=%.3f average_skipped_ms=%.6f",
+                        name, by_body.size(), static_cast<double>(average),
+                        static_cast<double>(average * ms_per_tu));
+            if (!by_body.empty()) {
+                const auto [kind, index, generation] = max_body;
+                std::printf(" max_body=(%u,%u,%u) max_skipped_tu=%llu max_skipped_ms=%.6f",
+                            static_cast<unsigned>(kind), static_cast<unsigned>(index),
+                            static_cast<unsigned>(generation),
+                            static_cast<unsigned long long>(maximum),
+                            static_cast<double>(maximum * ms_per_tu));
+            }
+            std::printf("\n");
+        }
+    };
+    Summary exhausted, all;
+    for (const auto& freeze : freezes) {
+        const BodyKey body{freeze.body.kind(), freeze.body.index(), freeze.body.generation};
+        const auto skipped = freeze.end - freeze.start;
+        all.by_body[body] += skipped;
+        if (freeze.exhausted)
+            exhausted.by_body[body] += skipped;
+    }
+    exhausted.print("exhausted");
+    all.print("all_frozen");
+}
 
 void print_detail(const sqp::benchmark::Result& result) {
     constexpr std::array<const char*, sqp::WorldState::StageStats::stage_count> names = {
@@ -159,6 +205,10 @@ int main(int argc, char** argv) {
         const std::string argument = argv[i];
         if (argument == "--detail") {
             options.detail = true;
+            continue;
+        }
+        if (argument == "--freeze-stats") {
+            options.freeze_stats = true;
             continue;
         }
         if (argument == "--check-determinism") {
@@ -256,6 +306,8 @@ int main(int argc, char** argv) {
                     result.name.c_str(), result.simulation_percent, result.ticks_per_second,
                     result.avg_ms_tick, result.p50_tick_ms, result.p75_tick_ms, result.p95_tick_ms,
                     result.max_tick_ms);
+        if (options.freeze_stats)
+            print_freeze_stats(result.stage_stats.body_freezes);
         if (options.detail) {
             for (std::size_t row = 0; row < result.final_layer_drift.size(); ++row)
                 std::printf("layer_%zu_horizontal_drift_half=%.6f final=%.6f\n", row,
