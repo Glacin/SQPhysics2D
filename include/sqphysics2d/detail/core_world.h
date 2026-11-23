@@ -297,7 +297,6 @@ struct WorldState {
 
         // Future events survive interval changes and are revalidated before use.
         std::vector<ToiEvent> toi_heap;
-        std::vector<IslandId> selected_islands;
         u64 next_sequence = 0;
 
     } process_toi;
@@ -380,6 +379,7 @@ struct WorldState {
             IslandId id;
             tick_t start = 0;
             tick_t end = 0;
+            bool received_toi_impulse = false;
         };
         std::vector<ProcessedIsland> processed_islands;
         // Rebuilt each invocation; storage capacity is retained across intervals.

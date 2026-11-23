@@ -90,15 +90,6 @@ bool event_has_budget(const WorldState& state, const ToiEvent& event) {
     return true;
 }
 
-void append_event_islands(WorldState& state, const ToiEvent& event) {
-    for (BodyHandle body : {event.pair.body_a, event.pair.body_b}) {
-        BodyConfigs::RegisterType type;
-        state.body_pool.get_register_type(body, type);
-        if (type != BodyConfigs::RegisterType::ImmutableStatic)
-            state.process_toi.selected_islands.push_back(*state.body_pool.island_of(body));
-    }
-}
-
 bool pose_at(const WorldState& state, BodyHandle body, tick_t time, Vec2& position,
              real& rotation) {
     BodyState body_state;
@@ -107,15 +98,18 @@ bool pose_at(const WorldState& state, BodyHandle body, tick_t time, Vec2& positi
     const Island* island = id ? state.island_pool.get(*id) : nullptr;
     if (!state.body_pool.get_state(body, body_state) ||
         !state.body_pool.get_register_type(body, registration) ||
-        (registration != BodyConfigs::RegisterType::ImmutableStatic &&
-         (!island || island->time >= time)))
+        (registration != BodyConfigs::RegisterType::ImmutableStatic && !island))
         return false;
     position = body_state.position;
     rotation = body_state.rotation;
-    if (registration != BodyConfigs::RegisterType::ImmutableStatic)
+    if (registration != BodyConfigs::RegisterType::ImmutableStatic &&
+        state.island_pool.frozen_until(*id) <= time) {
+        if (island->time >= time)
+            return false;
         predict_body_state(body_state.position, body_state.rotation, body_state.linear_velocity,
                            body_state.angular_velocity, {}, real(0), time - island->time, position,
                            rotation);
+    }
     return true;
 }
 
@@ -139,8 +133,9 @@ bool support_feature(const detail::ShapeQueryView& shape, Vec2 position, real ro
     const auto* polygon = std::get_if<ConvexPoly>(&shape.geometry());
     if (!polygon || polygon->local.size() < 3)
         return false;
+    const Vec2 center = position + math::rotate_vector(polygon->center_offset(), rotation);
     const auto world_vertex = [&](std::size_t index) {
-        return position + math::rotate_vector(polygon->local[index], rotation);
+        return center + math::rotate_vector(polygon->local[index], rotation);
     };
     real maximum = -std::numeric_limits<real>::infinity();
     u16 best_index = 0;
@@ -332,7 +327,6 @@ bool run_process_toi(WorldState& state, tick_t bound, bool& selected_time) {
     while (!output.toi_heap.empty() && output.toi_heap.front().time <= bound) {
         const tick_t earliest = output.toi_heap.front().time;
         bool valid_time = false;
-        output.selected_islands.clear();
         const auto restore_ordinary = [&] {
             if (!valid_time)
                 return;
@@ -350,6 +344,10 @@ bool run_process_toi(WorldState& state, tick_t bound, bool& selected_time) {
             if (event.time < state.schedule.time || !event_is_current(state, event))
                 continue;
             if (!event_is_after_islands(state, event))
+                continue;
+            ContactManifold manifold;
+            WorldState::ToiLocalContact local;
+            if (!event_manifold(state, event, manifold, local))
                 continue;
             bool propagated = false;
             if (!propagate_frozen_contact(state, event.pair, event.time, propagated))
@@ -369,36 +367,15 @@ bool run_process_toi(WorldState& state, tick_t bound, bool& selected_time) {
                 swap_active_delayed();
             }
             valid_time = true;
-            ContactManifold manifold;
-            WorldState::ToiLocalContact local;
-            if (!event_manifold(state, event, manifold, local))
-                continue;
             if (!pairs.manifolds->append(manifold)) {
                 restore_ordinary();
                 return stage_error(state, "run_process_toi: check failed (!pairs.manifolds->append(manifold))");
             }
             pairs.pairs->push_back(event.pair);
             pairs.toi_local_contacts.push_back(local);
-            append_event_islands(state, event);
         } while (!output.toi_heap.empty() && output.toi_heap.front().time == earliest);
 
-        // Skip there invalid interval so will not stuck in an infinite loop.
-        if (valid_time && pairs.pairs->empty() && output.selected_islands.empty()) {
-            restore_ordinary();
-            continue;
-        }
         if (valid_time) {
-            auto& islands = output.selected_islands;
-            std::sort(islands.begin(), islands.end(), [](IslandId a, IslandId b) {
-                return a.index != b.index ? a.index < b.index : a.generation < b.generation;
-            });
-            islands.erase(std::unique(islands.begin(), islands.end()), islands.end());
-            for (IslandId id : islands)
-                if (!state.island_pool.increment_toi_truncations(id)) {
-                    restore_ordinary();
-                    return stage_error(state, "run_process_toi: check failed (!state.island_pool.increment_toi_truncations(id))");
-                }
-            islands.clear();
             state.interval.microstep = true;
             state.interval.tick = false;
             state.interval.microstep_time = earliest;

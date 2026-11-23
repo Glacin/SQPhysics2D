@@ -70,11 +70,11 @@ bool run_advance_interval(WorldState& state) {
         schedule.time = interval.microstep_time;
         for (const auto& processed : state.solve.processed_islands) {
             const IslandId id = processed.id;
-            if (state.island_pool.get(id) &&
+            if (processed.received_toi_impulse && state.island_pool.get(id) &&
                 state.island_pool.toi_truncations(id) >=
                     state.settings.interval.max_truncations_per_tick &&
                 !freeze_island_until_next_tick(state, id, schedule.time))
-                return stage_error(state, "run_advance_interval: check failed (state.island_pool.get(id) && state.island_pool.toi_truncations(id) >= state.settings.interval.max_truncations_per_tick && !freeze_island_until_next_tick(state, id, schedule.time))");
+                return stage_error(state, "run_advance_interval: failed to freeze exhausted island");
         }
         clear_active_interval_data(state);
         state.pairs.pairs.swap(state.pairs.delayed_pairs);

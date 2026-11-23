@@ -7,14 +7,14 @@
 
 namespace sqp {
 
-// Bounds the scheduler's ordinary intervals and the number of TOI interruptions.
+// Bounds ordinary intervals and effective TOI microsteps.
 struct IntervalSettings {
     // Maximum predicted translation and rotation for bodies not using CCD.
     real max_linear_displacement_m = real(0.1);
     real max_angular_displacement_rad = real(0.01);
     // Minimum period for every body kind, rounded up to a power of two TU.
     tick_t min_period_tu = config::TU_PER_TICK / 4;
-    // Maximum TOI truncations charged to an island during one nominal tick.
+    // Maximum TOI microsteps with a nonzero solved contact impulse per island per tick.
     u32 max_truncations_per_tick = 4;
     // Replace invalid values with defaults and clamp the period and budget.
     void sanitize() noexcept;

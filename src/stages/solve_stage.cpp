@@ -621,6 +621,17 @@ bool run_solve(WorldState& state) {
         apply_contact_restitution(prepared);
         const std::size_t row = solve.constraint_pair_indices[i];
         const Pair& pair = (*pairs.pairs)[row];
+        const auto& constraint = *prepared.constraint;
+        if (state.interval.microstep &&
+            std::any_of(constraint.points, constraint.points + constraint.count,
+                        [](const ContactConstraintPoint& point) {
+                            return point.normal_impulse > real(0) || point.tangent_impulse != real(0);
+                        })) {
+            for (const auto body : {pair.body_a, pair.body_b})
+                if (const auto island = state.body_pool.island_of(body))
+                    solve.processed_islands[solve.island_positions[island->index]]
+                        .received_toi_impulse = true;
+        }
         const bool local = state.interval.microstep &&
                            pairs.toi_local_contacts.size() == pairs.pairs->size() &&
                            pairs.toi_local_contacts[row].valid;
@@ -644,6 +655,12 @@ bool run_solve(WorldState& state) {
             bump_motion_version(state, solve.bodies[i]);
     if (!run_update_contact_edges(state))
         return stage_error(state, "run_solve: check failed (!run_update_contact_edges(state))");
+    if (state.interval.microstep) {
+        for (const auto& processed : solve.processed_islands)
+            if (processed.received_toi_impulse &&
+                !state.island_pool.increment_toi_truncations(processed.id))
+                return stage_error(state, "run_solve: failed to charge TOI impulse to island");
+    }
     prune_contact_cache(state);
     clear_consumed(state);
     return true;
