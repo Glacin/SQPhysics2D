@@ -141,6 +141,13 @@ struct WorldState {
         };
         bool record_body_freezes = false;
         std::vector<BodyFreeze> body_freezes;
+        struct ToiOutcomes {
+            u64 microsteps = 0, effective_microsteps = 0;
+            u64 islands = 0, charged_islands = 0;
+            u64 selected_pairs = 0, solved_pairs = 0, effective_pairs = 0;
+            u64 approaching_contact_pairs = 0;
+        } toi_outcomes;
+        bool record_toi_outcomes = false;
         std::array<Entry, stage_count> stages{};
 #ifdef SQP_ENABLE_PERFORMANCE_PROFILING
         u64 pending_candidates = 0;

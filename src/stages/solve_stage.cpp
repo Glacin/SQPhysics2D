@@ -616,6 +616,8 @@ bool run_solve(WorldState& state) {
     for (IslandId id : solve.islands)
         if (!state.island_pool.set_time(id, target))
             return stage_error(state, "run_solve: check failed (!state.island_pool.set_time(id, target))");
+    const bool record_toi = state.interval.microstep && state.stats.record_toi_outcomes;
+    u64 effective_pairs = 0, approaching_pairs = 0;
     for (std::size_t i = 0; i < solve.prepared.size(); ++i) {
         auto& prepared = solve.prepared[i];
         apply_contact_restitution(prepared);
@@ -627,6 +629,16 @@ bool run_solve(WorldState& state) {
                         [](const ContactConstraintPoint& point) {
                             return point.normal_impulse > real(0) || point.tangent_impulse != real(0);
                         })) {
+            if (record_toi) {
+                ++effective_pairs;
+                approaching_pairs += std::any_of(
+                    constraint.points, constraint.points + constraint.count,
+                    [](const ContactConstraintPoint& point) {
+                        return point.normal_impulse > real(0) &&
+                               point.base_separation <= real(0) &&
+                               point.initial_normal_velocity < real(0);
+                    });
+            }
             for (const auto body : {pair.body_a, pair.body_b})
                 if (const auto island = state.body_pool.island_of(body))
                     solve.processed_islands[solve.island_positions[island->index]]
@@ -656,10 +668,25 @@ bool run_solve(WorldState& state) {
     if (!run_update_contact_edges(state))
         return stage_error(state, "run_solve: check failed (!run_update_contact_edges(state))");
     if (state.interval.microstep) {
-        for (const auto& processed : solve.processed_islands)
-            if (processed.received_toi_impulse &&
-                !state.island_pool.increment_toi_truncations(processed.id))
+        u64 charged_islands = 0;
+        for (const auto& processed : solve.processed_islands) {
+            if (!processed.received_toi_impulse)
+                continue;
+            if (!state.island_pool.increment_toi_truncations(processed.id))
                 return stage_error(state, "run_solve: failed to charge TOI impulse to island");
+            ++charged_islands;
+        }
+        if (record_toi) {
+            auto& stats = state.stats.toi_outcomes;
+            ++stats.microsteps;
+            stats.effective_microsteps += charged_islands != 0;
+            stats.islands += solve.processed_islands.size();
+            stats.charged_islands += charged_islands;
+            stats.selected_pairs += count;
+            stats.solved_pairs += solve.constraints.size();
+            stats.effective_pairs += effective_pairs;
+            stats.approaching_contact_pairs += approaching_pairs;
+        }
     }
     prune_contact_cache(state);
     clear_consumed(state);

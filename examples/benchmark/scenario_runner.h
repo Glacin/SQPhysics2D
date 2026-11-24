@@ -21,6 +21,7 @@ struct Options {
     bool detail = false;
     bool check_determinism = false;
     bool freeze_stats = false;
+    bool toi_stats = false;
     std::optional<real> proxy_extension_ratio;
 };
 

@@ -143,6 +143,7 @@ Result run(Scenario& scenario, const Options& options) {
         return freeze.end <= measure_start;
     });
     context.state.stats = {};
+    context.state.stats.record_toi_outcomes = options.toi_stats;
     context.state.stats.record_body_freezes = options.freeze_stats;
     context.state.stats.body_freezes = std::move(body_freezes);
 

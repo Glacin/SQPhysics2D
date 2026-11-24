@@ -55,7 +55,7 @@ void usage() {
     std::fprintf(stderr, "usage: sqphysics2d_benchmark SCENARIO [--bodies N] [--seed N] "
                          "[--warmup N] [--ticks N] [--sleep on|off] "
                          "[--initial-sleep on|off] [--awake-bodies N] "
-                         "[--proxy-extension-ratio 0..1] [--detail] [--freeze-stats] [--check-determinism]\n"
+                         "[--proxy-extension-ratio 0..1] [--detail] [--freeze-stats] [--toi-stats] [--check-determinism]\n"
                          "scenarios: box_free_motion, box_floor_sleep, aabb_box_pyramid, "
                          "rigid_box_pyramid, circle_box_bounce, convex_polygon_bounce, "
                          "mixed_shape_bounce\n"
@@ -119,6 +119,20 @@ void print_freeze_stats(std::span<const sqp::WorldState::StageStats::BodyFreeze>
     }
     exhausted.print("exhausted");
     all.print("all_frozen");
+}
+
+void print_toi_stats(const sqp::WorldState::StageStats::ToiOutcomes& stats) {
+    const auto print = [](const char* label, sqp::u64 effective, sqp::u64 total) {
+        const double percent = total ? 100.0 * double(effective) / double(total) : 0;
+        std::printf("%s=%llu/%llu (%.4f%%)\n", label,
+                    static_cast<unsigned long long>(effective),
+                    static_cast<unsigned long long>(total), percent);
+    };
+    print("toi_effective_pairs", stats.effective_pairs, stats.selected_pairs);
+    print("toi_solved_pairs", stats.solved_pairs, stats.selected_pairs);
+    print("toi_approaching_contact_pairs", stats.approaching_contact_pairs, stats.selected_pairs);
+    print("toi_effective_microsteps", stats.effective_microsteps, stats.microsteps);
+    print("toi_charged_islands", stats.charged_islands, stats.islands);
 }
 
 void print_detail(const sqp::benchmark::Result& result) {
@@ -209,6 +223,10 @@ int main(int argc, char** argv) {
         }
         if (argument == "--freeze-stats") {
             options.freeze_stats = true;
+            continue;
+        }
+        if (argument == "--toi-stats") {
+            options.toi_stats = true;
             continue;
         }
         if (argument == "--check-determinism") {
@@ -308,6 +326,8 @@ int main(int argc, char** argv) {
                     result.max_tick_ms);
         if (options.freeze_stats)
             print_freeze_stats(result.stage_stats.body_freezes);
+        if (options.toi_stats)
+            print_toi_stats(result.stage_stats.toi_outcomes);
         if (options.detail) {
             for (std::size_t row = 0; row < result.final_layer_drift.size(); ++row)
                 std::printf("layer_%zu_horizontal_drift_half=%.6f final=%.6f\n", row,
