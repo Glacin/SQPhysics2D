@@ -23,6 +23,7 @@ struct Options {
     bool freeze_stats = false;
     bool toi_stats = false;
     std::optional<real> proxy_extension_ratio;
+    std::optional<u32> toi_budget;
 };
 
 struct Context {

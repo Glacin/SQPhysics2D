@@ -67,6 +67,22 @@ sqp::u32 add_lite_body(sqp::WorldState& state, sqp::IslandId island, sqp::Vec2 p
     return index;
 }
 
+sqp::u32 add_test_polygon(sqp::WorldState& state, sqp::IslandId island,
+                          const sqp::RigidBodyDef& body_definition,
+                          const sqp::PolygonVertices& vertices) {
+    const auto body = state.body_pool.add_rigid(body_definition);
+    sqp::PolygonShapeDef definition;
+    definition.vertices = vertices;
+    const auto shape = state.shape_pool.add_polygon(definition);
+    REQUIRE(state.body_pool.attach_shape(body, shape, state.shape_pool));
+    if (island.valid())
+        REQUIRE(state.island_pool.add_body(island, body, state.body_pool));
+    const auto index = static_cast<sqp::u32>(state.broad_phase.bodies.size());
+    state.broad_phase.bodies.push_back(body);
+    state.broad_phase.shapes.push_back(shape);
+    return index;
+}
+
 void pair(sqp::WorldState& state, sqp::u32 a, sqp::u32 b) {
     state.broad_phase.candidates.push_back({a, b});
 }
@@ -908,4 +924,88 @@ TEST_CASE("A separating polygon overlap only schedules a later reentry",
             CHECK(state.island_pool.last_frozen_until(*island) == 0);
         }
     }
+}
+
+TEST_CASE("Polygon CCD keeps real hits in the first time unit", "[world][narrow_phase][toi]") {
+    using namespace sqp;
+    WorldState state;
+    const auto island = state.island_pool.create();
+    state.interval.target_end = 4;
+    const bool reversed = GENERATE(false, true);
+    const real travel_per_tu = GENERATE(real(0.25), real(2));
+
+    RigidBodyDef wall;
+    wall.configs.register_type = BodyConfigs::RegisterType::ImmutableStatic;
+    const auto fixed = add_test_polygon(state, {}, wall,
+                                        {{real(-0.5), -1}, {real(0.5), -1},
+                                         {real(0.5), 1}, {real(-0.5), 1}});
+    RigidBodyDef moving;
+    moving.position = {real(-0.75), 0};
+    moving.linear_velocity = {travel_per_tu * real(config::TU_PER_SECOND), 0};
+    moving.configs.ccd_override = BodyConfigs::CcdOverride::Shapecast;
+    const real h = real(0.1);
+    const auto body = add_test_polygon(state, island, moving, {{-h, -h}, {h, -h}, {h, h}, {-h, h}});
+
+    // The faster box also leaves the wall before the end of the first time unit.
+    pair(state, reversed ? body : fixed, reversed ? fixed : body);
+    REQUIRE(run_narrow_phase(state));
+    REQUIRE(state.narrow_phase.toi_times.size() == 1);
+    CHECK(state.narrow_phase.toi_times.front() == 1);
+    CHECK(state.narrow_phase.toi_normals.front().x == Catch::Approx(reversed ? -1 : 1));
+}
+
+TEST_CASE("Rotating polygon keeps an interior hit against a static wall",
+          "[world][narrow_phase][toi]") {
+    using namespace sqp;
+    WorldState state;
+    const auto island = state.island_pool.create();
+    state.interval.target_end = config::TU_PER_TICK;
+    const bool reversed = GENERATE(false, true);
+    RigidBodyDef wall;
+    wall.configs.register_type = BodyConfigs::RegisterType::ImmutableStatic;
+    const auto fixed = add_test_polygon(state, {}, wall, {{-8, -1}, {8, -1}, {8, 1}, {-8, 1}});
+    const auto blade = add_body(state, island, {0, real(2.5)}, {},
+                                BodyConfigs::CcdOverride::Shapecast, true, 0,
+                                math::PI * real(config::TICKS_PER_SECOND));
+
+    pair(state, reversed ? blade : fixed, reversed ? fixed : blade);
+    REQUIRE(run_narrow_phase(state));
+    REQUIRE(state.narrow_phase.toi_times.size() == 1);
+    CHECK(state.narrow_phase.toi_times.front() > 1);
+    CHECK(state.narrow_phase.toi_times.front() < config::TU_PER_TICK / 2);
+    CHECK(state.narrow_phase.toi_normals.front().y == Catch::Approx(reversed ? 1 : -1));
+}
+
+TEST_CASE("Polygon CCD rejects a one-unit wall hit when the entire sweep separates",
+          "[world][narrow_phase][toi]") {
+    using namespace sqp;
+    WorldState state;
+    const auto island = state.island_pool.create();
+    state.interval.target_end = 51634;
+    const bool reversed = GENERATE(false, true);
+
+    RigidBodyDef wall;
+    wall.position = {0, real(512.5)};
+    wall.configs.register_type = BodyConfigs::RegisterType::ImmutableStatic;
+    const auto fixed = add_test_polygon(state, {}, wall,
+                                         {{-513, real(-0.5)}, {513, real(-0.5)},
+                                          {513, real(0.5)}, {-513, real(0.5)}});
+
+    // Wall 1 and rigid body 189 at the start of the repeating budget-64 sweep.
+    RigidBodyDef moving({real(78.2668152), real(508.3951416015625)}, real(-71.4339371),
+                        {real(-20.8869419), real(48.8508339)}, real(-39.7226753));
+    moving.configs.ccd_override = BodyConfigs::CcdOverride::Shapecast;
+    const Vec2 center{real(-7.52980611e-8), real(-1.42360406e-7)};
+    const auto body = add_test_polygon(
+        state, island, moving,
+        {center + Vec2{real(4.29351902), real(1.49808979)},
+         center + Vec2{real(-1.26991999), real(2.70342946)},
+         center + Vec2{real(-5.07837248), real(0.172721133)},
+         center + Vec2{real(-1.86868739), real(-2.59668136)},
+         center + Vec2{real(3.92346001), real(-1.77755892)}});
+
+    pair(state, reversed ? body : fixed, reversed ? fixed : body);
+    REQUIRE(run_narrow_phase(state));
+    CHECK(state.narrow_phase.toi_times.empty());
+    CHECK(state.pairs.pairs->empty());
 }

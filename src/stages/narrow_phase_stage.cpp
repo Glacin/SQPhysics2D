@@ -183,6 +183,65 @@ bool axis_aligned_rectangle(const CandidateBody& body, const CandidatePose& star
     return bounds_at(start, bounds_start) && bounds_at(end, bounds_end);
 }
 
+// Prove separation on a fixed axis for the entire affine translation/rotation sweep.
+bool polygon_sweep_is_separated(const CandidateBody& fixed, const CandidateBody& moving,
+                                Vec2 outward_normal) {
+    const auto* fixed_polygon = std::get_if<ConvexPoly>(&fixed.view.geometry());
+    const auto* moving_polygon = std::get_if<ConvexPoly>(&moving.view.geometry());
+    if (!fixed_polygon || !moving_polygon || fixed_polygon->local.size() < 3 ||
+        moving_polygon->local.size() < 3)
+        return false;
+
+    const Vec2d normal(outward_normal);
+    const double normal_length = normal.length();
+    if (!std::isfinite(normal_length) || normal_length <= config::EPSILON)
+        return false;
+    const Vec2d axis = normal / normal_length;
+    const Vec2d fixed_center(fixed_polygon->center_offset());
+    const double fixed_cos = std::cos(static_cast<double>(fixed.start.rotation));
+    const double fixed_sin = std::sin(static_cast<double>(fixed.start.rotation));
+    double support = -std::numeric_limits<double>::infinity();
+    double fixed_scale = 0;
+    for (Vec2 vertex : fixed_polygon->local) {
+        const Vec2d v(vertex);
+        const auto point = math::rotate_vector(v + fixed_center, fixed_cos, fixed_sin);
+        const double projection = math::dot(axis, point);
+        if (!std::isfinite(projection))
+            return false;
+        support = std::max(support, projection);
+        fixed_scale = std::max(fixed_scale, v.length());
+    }
+
+    const Vec2d start = Vec2d(moving.start.position) - Vec2d(fixed.start.position);
+    const Vec2d end = Vec2d(moving.end.position) - Vec2d(fixed.start.position);
+    const Vec2d translation = end - start;
+    const double rotation = moving.start.rotation;
+    const double angular_delta = static_cast<double>(moving.end.rotation) - rotation;
+    const double moving_cos = std::cos(rotation);
+    const double moving_sin = std::sin(rotation);
+    const Vec2d moving_center(moving_polygon->center_offset());
+    const double scale = 1.0 + fixed_scale + fixed_center.length() + start.length() +
+                         end.length() + moving_center.length();
+    constexpr double rounding = 64.0 * std::numeric_limits<double>::epsilon();
+
+    for (Vec2 vertex : moving_polygon->local) {
+        const Vec2d v(vertex);
+        const Vec2d local_point = v + moving_center;
+        const Vec2d offset = math::rotate_vector(local_point, moving_cos, moving_sin);
+        const double gap = math::dot(axis, start + offset) - support;
+        const Vec2d tangent{-offset.y, offset.x};
+        const double slope = math::dot(axis, translation + angular_delta * tangent);
+        const double curvature_bound = local_point.length() * angular_delta * angular_delta;
+        const double end_lower_bound = gap + slope - 0.5 * curvature_bound;
+        const double margin = rounding * (scale + v.length() + std::abs(slope) + curvature_bound);
+        // The concave quadratic lower bound is smallest at one of the two endpoints.
+        if (!std::isfinite(gap) || !std::isfinite(end_lower_bound) ||
+            !(gap > margin && end_lower_bound > margin))
+            return false;
+    }
+    return true;
+}
+
 bool circle_center_moves_linearly(const CandidateBody& body, const CandidatePose& start,
                                   const CandidatePose& end) {
     return math::abs(end.rotation - start.rotation) <= config::EPSILON ||
@@ -396,6 +455,17 @@ bool run_narrow_phase(WorldState& state) {
         if (!std::isfinite(fraction) || !std::isfinite(normal.x) || !std::isfinite(normal.y))
             continue;
 
+        const tick_t toi_time = ceil_toi_time(start_time, state.interval.target_end, fraction);
+        if (fraction > real(0) && toi_time - start_time == 1) {
+            constexpr auto fixed = BodyConfigs::RegisterType::ImmutableStatic;
+            const bool fixed_a = a.configuration.configs.register_type == fixed;
+            const bool fixed_b = b.configuration.configs.register_type == fixed;
+            if (fixed_a != fixed_b &&
+                (fixed_a ? polygon_sweep_is_separated(a, b, -normal)
+                         : polygon_sweep_is_separated(b, a, normal)))
+                continue;
+        }
+
         const auto impact_pose = [fraction](const CandidatePose& start, const CandidatePose& end) {
             return CandidatePose{start.position + (end.position - start.position) * fraction,
                                  start.rotation + (end.rotation - start.rotation) * fraction};
@@ -404,7 +474,7 @@ bool run_narrow_phase(WorldState& state) {
         const auto impact_b = impact_pose(local_start_b, local_end_b);
 
         output.toi_pairs.push_back(pair);
-        output.toi_times.push_back(ceil_toi_time(start_time, state.interval.target_end, fraction));
+        output.toi_times.push_back(toi_time);
         output.toi_normals.push_back(normal);
         output.toi_impacts.push_back({origin, impact_a.position, impact_b.position,
                                       impact_a.rotation, impact_b.rotation, true});

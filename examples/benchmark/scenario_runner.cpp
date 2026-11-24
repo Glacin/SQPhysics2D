@@ -105,6 +105,8 @@ Result run(Scenario& scenario, const Options& options) {
     if (options.proxy_extension_ratio)
         context.settings.broad_phase.proxy_extension_ratio = *options.proxy_extension_ratio;
     context.settings.allow_sleep = options.allow_sleep;
+    if (options.toi_budget)
+        context.settings.interval.max_truncations_per_tick = *options.toi_budget;
     context.settings.sanitize();
     context.state.settings = context.settings;
     std::vector<TickHash> tick_hashes;

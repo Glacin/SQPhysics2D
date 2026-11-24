@@ -55,7 +55,8 @@ void usage() {
     std::fprintf(stderr, "usage: sqphysics2d_benchmark SCENARIO [--bodies N] [--seed N] "
                          "[--warmup N] [--ticks N] [--sleep on|off] "
                          "[--initial-sleep on|off] [--awake-bodies N] "
-                         "[--proxy-extension-ratio 0..1] [--detail] [--freeze-stats] [--toi-stats] [--check-determinism]\n"
+                         "[--proxy-extension-ratio 0..1] [--toi-budget N] [--detail] "
+                         "[--freeze-stats] [--toi-stats] [--check-determinism]\n"
                          "scenarios: box_free_motion, box_floor_sleep, aabb_box_pyramid, "
                          "rigid_box_pyramid, circle_box_bounce, convex_polygon_bounce, "
                          "mixed_shape_bounce\n"
@@ -95,9 +96,11 @@ void print_freeze_stats(std::span<const sqp::WorldState::StageStats::BodyFreeze>
             }
             const long double average = by_body.empty() ? 0 : total / by_body.size();
             constexpr long double ms_per_tu = 1000.0L / sqp::config::TU_PER_SECOND;
-            std::printf("%s_bodies=%zu average_skipped_tu=%.3f average_skipped_ms=%.6f",
+            std::printf("%s_bodies=%zu average_skipped_tu=%.3f average_skipped_ms=%.6f "
+                        "total_skipped_ms=%.6f",
                         name, by_body.size(), static_cast<double>(average),
-                        static_cast<double>(average * ms_per_tu));
+                        static_cast<double>(average * ms_per_tu),
+                        static_cast<double>(total * ms_per_tu));
             if (!by_body.empty()) {
                 const auto [kind, index, generation] = max_body;
                 std::printf(" max_body=(%u,%u,%u) max_skipped_tu=%llu max_skipped_ms=%.6f",
@@ -235,7 +238,8 @@ int main(int argc, char** argv) {
         }
         if (argument != "--bodies" && argument != "--seed" && argument != "--warmup" &&
             argument != "--ticks" && argument != "--sleep" && argument != "--initial-sleep" &&
-            argument != "--awake-bodies" && argument != "--proxy-extension-ratio") {
+            argument != "--awake-bodies" && argument != "--proxy-extension-ratio" &&
+            argument != "--toi-budget") {
             std::fprintf(stderr, "unknown option: %s\n", argument.c_str());
             return 1;
         }
@@ -281,6 +285,12 @@ int main(int argc, char** argv) {
                 options.seed = static_cast<u32>(value);
             else
                 options.awake_bodies = static_cast<u32>(value);
+        } else if (argument == "--toi-budget") {
+            if (value == 0 || value > std::numeric_limits<u32>::max()) {
+                std::fprintf(stderr, "toi-budget must be a positive u32\n");
+                return 1;
+            }
+            options.toi_budget = static_cast<u32>(value);
         } else if (argument == "--warmup") {
             options.warmup_ticks = value;
         } else if (argument == "--ticks") {
@@ -324,6 +334,8 @@ int main(int argc, char** argv) {
                     result.name.c_str(), result.simulation_percent, result.ticks_per_second,
                     result.avg_ms_tick, result.p50_tick_ms, result.p75_tick_ms, result.p95_tick_ms,
                     result.max_tick_ms);
+        if (options.toi_budget)
+            std::printf("toi_budget=%u\n", static_cast<unsigned>(*options.toi_budget));
         if (options.freeze_stats)
             print_freeze_stats(result.stage_stats.body_freezes);
         if (options.toi_stats)
