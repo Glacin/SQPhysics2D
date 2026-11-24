@@ -128,6 +128,7 @@ u64 hash_world_state(const WorldState& s) {
     h.sequence(s.broad_phase.interval_proxy_indices);
     h.sequence(s.broad_phase.selected); h.add(s.broad_phase.selection_epoch);
     h.sequence(s.broad_phase.toi_changed_islands); h.add(s.broad_phase.reprepare_after_toi);
+    h.add(s.broad_phase.freeze_retry);
     h.sequence(s.broad_phase.candidates); h.sequence(s.broad_phase.ordinary_candidates);
 
     sequence(h, s.process_toi.toi_heap, [&](const auto& v) {
@@ -135,6 +136,12 @@ u64 hash_world_state(const WorldState& s) {
         h.add(v.sequence); add(h, v.impact);
     });
     h.add(s.process_toi.next_sequence);
+    h.add(s.narrow_phase.prepared_time.has_value());
+    if (s.narrow_phase.prepared_time) {
+        h.add(*s.narrow_phase.prepared_time);
+        h.add(s.narrow_phase.prepared_end);
+    }
+    h.sequence(s.narrow_phase.ordinary_contact_keys);
     h.sequence(s.narrow_phase.toi_pairs);
     h.sequence(s.narrow_phase.toi_times); h.sequence(s.narrow_phase.toi_normals);
     sequence(h, s.narrow_phase.toi_impacts, [&](const auto& v) { add(h, v); });

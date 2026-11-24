@@ -52,14 +52,27 @@ TEST_CASE("A timed velocity command executes without advancing a frozen island",
     const sqp::tick_t command_time = sqp::config::TU_PER_TICK / 4;
     const auto command = world.set_body_velocity(command_time, body, {3, 4});
     world.state().interval.target_end = command_time;
-    REQUIRE(world.process_selected_commands());
-    CHECK(take(world, command).status == sqp::CommandStatus::Applied);
-    sqp::BodyState after;
-    REQUIRE(world.state().body_pool.get_state(body, after));
-    CHECK(after.position == initial.position);
-    CHECK(after.linear_velocity == sqp::Vec2{3, 4});
-    CHECK(world.state().island_pool.get(*island)->time == sqp::config::TU_PER_TICK);
-    CHECK(world.state().island_pool.frozen_until(*island) == sqp::config::TU_PER_TICK);
+    REQUIRE(sqp::run_narrow_phase(world.state()));
+    REQUIRE(world.state().narrow_phase.prepared_time == 0);
+    sqp::WorldSnapshot saved;
+    REQUIRE(world.capture_snapshot(saved));
+
+    const auto execute = [&] {
+        REQUIRE(world.process_selected_commands());
+        CHECK(take(world, command).status == sqp::CommandStatus::Applied);
+        CHECK_FALSE(world.state().narrow_phase.prepared_time.has_value());
+        sqp::BodyState after;
+        REQUIRE(world.state().body_pool.get_state(body, after));
+        CHECK(after.position == initial.position);
+        CHECK(after.linear_velocity == sqp::Vec2{3, 4});
+        CHECK(world.state().island_pool.get(*island)->time == sqp::config::TU_PER_TICK);
+        CHECK(world.state().island_pool.frozen_until(*island) == sqp::config::TU_PER_TICK);
+    };
+    execute();
+    REQUIRE(world.restore_snapshot(saved));
+    CHECK(world.state().narrow_phase.prepared_time == 0);
+    CHECK(world.state().narrow_phase.prepared_end == command_time);
+    execute();
 }
 
 TEST_CASE("Body and shape commands keep proxies aligned", "[world][command]") {

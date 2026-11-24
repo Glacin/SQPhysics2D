@@ -99,6 +99,93 @@ TEST_CASE("TOI reprepare queries only the islands advanced by the microstep",
     CHECK(has_pair(state.broad_phase.candidates, changed_proxy, unchanged_proxy));
 }
 
+TEST_CASE("Freeze retries match full collision preparation and query the frozen pose",
+          "[world][broad_phase][toi]") {
+    using namespace sqp;
+    WorldState state;
+    const auto add_island = [&] {
+        const auto id = state.island_pool.create();
+        state.interval.islands->push_back(id);
+        return id;
+    };
+    const auto first = add_island();
+    const auto next = add_island();
+    const auto last = add_island();
+    state.schedule.time = 3;
+    state.interval.target_end = config::TU_PER_TICK / 2;
+    const auto frozen_proxy = add_circle_proxy(state, first, {-20, 0});
+    const auto next_proxy = add_circle_proxy(state, next, {real(1.5), 0}, {-1, 0});
+    const auto last_proxy = add_circle_proxy(state, last, {3, 0});
+    const auto ordinary = add_circle_proxy(state, add_island(), {10, 0});
+    const auto ordinary_other = add_circle_proxy(state, add_island(), {11, 0});
+    const auto impact = add_circle_proxy(state, add_island(), {0, 10}, {512, 0});
+    const auto impact_other = add_circle_proxy(state, add_island(), {4, 10});
+    REQUIRE(run_broad_phase(state));
+    REQUIRE(run_narrow_phase(state));
+    CHECK(has_pair(state.narrow_phase.ordinary_contact_keys, ordinary, ordinary_other));
+    REQUIRE(state.narrow_phase.toi_pairs.size() == 1);
+    bool selected = false;
+    REQUIRE(run_process_toi(state, state.schedule.time, selected));
+    CHECK_FALSE(selected);
+    REQUIRE(state.process_toi.toi_heap.size() == 1);
+
+    const bool advance_schedule = GENERATE(false, true);
+    if (advance_schedule)
+        ++state.schedule.time;
+    const auto frozen_body = state.broad_phase.bodies[frozen_proxy];
+    REQUIRE(state.body_pool.set_pose(frozen_body, {0, 0}, 0));
+    REQUIRE(freeze_island_until_next_tick(state, first, state.schedule.time));
+    state.broad_phase.toi_changed_islands = {first};
+    state.broad_phase.reprepare_after_toi = true;
+    state.broad_phase.freeze_retry = true;
+
+    WorldState full(state);
+    full.broad_phase.reprepare_after_toi = false;
+    full.narrow_phase.prepared_time.reset();
+    REQUIRE(run_broad_phase(full));
+    REQUIRE(run_narrow_phase(full));
+    REQUIRE(run_broad_phase(state));
+    CHECK(state.broad_phase.interval_proxy_indices == std::vector<u32>{frozen_proxy});
+    CHECK(state.broad_phase.candidates == full.broad_phase.ordinary_candidates);
+    CHECK(has_pair(state.broad_phase.candidates, frozen_proxy, next_proxy));
+    CHECK(state.broad_phase.start_aabbs[frozen_proxy] == state.broad_phase.end_aabbs[frozen_proxy]);
+    REQUIRE(run_narrow_phase(state));
+    CHECK(*state.pairs.pairs == *full.pairs.pairs);
+    CHECK(state.pairs.manifolds->counts == full.pairs.manifolds->counts);
+    CHECK(state.pairs.manifolds->normals_x == full.pairs.manifolds->normals_x);
+    CHECK(state.pairs.manifolds->normals_y == full.pairs.manifolds->normals_y);
+    CHECK(state.pairs.manifolds->points_x == full.pairs.manifolds->points_x);
+    CHECK(state.pairs.manifolds->points_y == full.pairs.manifolds->points_y);
+    CHECK(state.pairs.manifolds->depths == full.pairs.manifolds->depths);
+    CHECK(state.pairs.manifolds->keys == full.pairs.manifolds->keys);
+    REQUIRE(full.narrow_phase.toi_pairs.size() == 1);
+    if (advance_schedule) {
+        CHECK(state.narrow_phase.toi_pairs == full.narrow_phase.toi_pairs);
+        CHECK(state.narrow_phase.toi_times == full.narrow_phase.toi_times);
+    } else {
+        CHECK(state.narrow_phase.toi_pairs.empty());
+        CHECK(state.process_toi.toi_heap.front().pair == full.narrow_phase.toi_pairs.front());
+        CHECK(state.process_toi.toi_heap.front().time == full.narrow_phase.toi_times.front());
+        CHECK(state.process_toi.toi_heap.front().normal == full.narrow_phase.toi_normals.front());
+    }
+
+    for (const auto proxy : {next_proxy, last_proxy}) {
+        REQUIRE(run_process_toi(state, state.interval.target_end, selected));
+        CHECK_FALSE(selected);
+        REQUIRE(state.broad_phase.freeze_retry);
+        REQUIRE(run_broad_phase(state));
+        CHECK(state.broad_phase.interval_proxy_indices == std::vector<u32>{proxy});
+        REQUIRE(run_narrow_phase(state));
+    }
+    CHECK(state.island_pool.frozen_until(next) == config::TU_PER_TICK);
+    CHECK(state.island_pool.frozen_until(last) == config::TU_PER_TICK);
+    REQUIRE(run_process_toi(state, state.interval.target_end, selected));
+    REQUIRE(selected);
+    REQUIRE(state.pairs.pairs->size() == 1);
+    CHECK(state.pairs.pairs->front().body_a == state.broad_phase.bodies[impact]);
+    CHECK(state.pairs.pairs->front().body_b == state.broad_phase.bodies[impact_other]);
+}
+
 TEST_CASE("multiple rotating shapes keep exact endpoint and swept bounds",
           "[world][broad_phase]") {
     for (bool indexed : {false, true}) {

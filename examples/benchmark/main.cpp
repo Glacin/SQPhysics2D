@@ -170,6 +170,12 @@ void print_detail(const sqp::benchmark::Result& result) {
 #endif
     }
 #ifdef SQP_ENABLE_PERFORMANCE_PROFILING
+    const auto& stats = result.stage_stats;
+    std::printf("freeze_retries=%llu freeze_retry_queries=%llu freeze_retry_sweeps=%llu\n",
+                static_cast<unsigned long long>(stats.freeze_retries),
+                static_cast<unsigned long long>(stats.freeze_retry_queries),
+                static_cast<unsigned long long>(stats.freeze_retry_sweeps));
+
     const auto& average = result.tick_averages;
     std::printf("\n%-16s %16s %16s %16s %16s %16s\n", "tick_average", "intervals",
                 "active_islands", "active_bodies", "candidates", "pairs");

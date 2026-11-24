@@ -157,6 +157,9 @@ struct WorldState {
         u64 pending_nodes_visited = 0;
         u64 pending_proxy_reinsertions = 0;
         u64 pending_query_calls = 0;
+        u64 freeze_retries = 0;
+        u64 freeze_retry_queries = 0;
+        u64 freeze_retry_sweeps = 0;
         std::vector<IntervalEntry> interval_entries;
 #endif
     } stats;
@@ -232,9 +235,10 @@ struct WorldState {
         std::vector<u32> interval_proxy_indices;
         std::vector<u32> selected;
         u32 selection_epoch = 0;
-        // After a TOI microstep, only these islands changed their predicted sweep.
+        // Islands whose proxy sweeps changed during TOI solving or freeze propagation.
         std::vector<IslandId> toi_changed_islands;
         bool reprepare_after_toi = false;
+        bool freeze_retry = false;
 
         // Output of BroadPhase stage.
         std::vector<BroadPhase::Pair> candidates;
@@ -282,6 +286,12 @@ struct WorldState {
         std::vector<CandidateCacheEntry> candidate_cache;
         u32 candidate_cache_epoch = 0;
 
+        // Ordinary contact rows are reusable only within the same prepared time span.
+        std::optional<tick_t> prepared_time;
+        tick_t prepared_end = 0;
+        std::vector<BroadPhase::Pair> ordinary_contact_keys;
+        std::vector<BroadPhase::Pair> previous_contact_keys;
+
         // Aligned TOI event columns; toi_impacts records the unrounded impact pose.
         std::vector<Pair> toi_pairs;
         // Absolute TOI time.
@@ -312,6 +322,7 @@ struct WorldState {
         // Future events survive interval changes and are revalidated before use.
         std::vector<ToiEvent> toi_heap;
         u64 next_sequence = 0;
+        std::vector<ToiEvent> selected_events;
 
     } process_toi;
 

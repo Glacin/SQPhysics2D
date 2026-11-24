@@ -60,6 +60,8 @@ void clear_active_interval_data(WorldState& state) {
     state.pairs.original_manifolds.clear();
     state.pairs.original_manifolds_valid = false;
     state.broad_phase.candidates.clear();
+    state.narrow_phase.prepared_time.reset();
+    state.narrow_phase.ordinary_contact_keys.clear();
     state.narrow_phase.toi_pairs.clear();
     state.narrow_phase.toi_times.clear();
     state.narrow_phase.toi_normals.clear();
@@ -103,7 +105,8 @@ bool run_advance_interval(WorldState& state) {
         broad.toi_changed_islands.clear();
         for (const auto& processed : state.solve.processed_islands)
             if (const Island* island = state.island_pool.get(processed.id);
-                island && island->time <= interval.target_end)
+                island && (island->time <= interval.target_end ||
+                           state.island_pool.frozen_until(processed.id) > schedule.time))
                 broad.toi_changed_islands.push_back(processed.id);
         broad.reprepare_after_toi = true;
         clear_active_interval_data(state);

@@ -269,6 +269,38 @@ TEST_CASE("Frozen contact propagation follows only scanned TOI pairs", "[world][
     CHECK(f.state.island_pool.frozen_until(c_island) == sqp::config::TU_PER_TICK);
 }
 
+TEST_CASE("A freeze retry preserves valid TOIs already taken at the same time", "[world][toi]") {
+    Fixture f;
+    const auto other = f.state.island_pool.create();
+    const auto unrelated = f.state.island_pool.create();
+    const auto first = f.pair({10, 0}, {11, 0}, unrelated, unrelated);
+    const auto propagating = f.pair({0, 0}, {1, 0}, other);
+    const auto last = f.pair({14, 0}, {15, 0}, unrelated, unrelated);
+    f.state.schedule.time = 3;
+    f.state.schedule.prepared = true;
+    f.state.interval.target_end = 8;
+    *f.state.interval.islands = {f.island, other, unrelated};
+    REQUIRE(sqp::freeze_island_until_next_tick(f.state, f.island, 3));
+    f.push(first, 5);
+    f.push(f.current_pair(propagating), 5);
+    f.push(last, 5);
+
+    bool selected = false;
+    REQUIRE(sqp::run_process_toi(f.state, 5, selected));
+    CHECK_FALSE(selected);
+    CHECK(f.state.broad_phase.freeze_retry);
+    CHECK(f.state.broad_phase.toi_changed_islands == std::vector<sqp::IslandId>{other});
+    CHECK(*f.state.interval.islands == std::vector<sqp::IslandId>{f.island, unrelated});
+    CHECK(f.state.pairs.pairs->empty());
+    REQUIRE(f.state.process_toi.toi_heap.size() == 2);
+    CHECK(f.state.process_toi.toi_heap.front().sequence == 0);
+
+    REQUIRE(sqp::run_process_toi(f.state, 5, selected));
+    REQUIRE(selected);
+    CHECK(*f.state.pairs.pairs == std::vector<sqp::Pair>{first, last});
+    CHECK(f.state.process_toi.next_sequence == 3);
+}
+
 TEST_CASE("A TOI without a manifold cannot propagate a freeze", "[world][toi]") {
     Fixture f;
     const auto other = f.state.island_pool.create();
@@ -343,9 +375,12 @@ TEST_CASE("A static contact endpoint does not acquire an island freeze", "[world
     f.push({moving, fixed, moving_shape, fixed_shape,
             versions[*f.state.body_pool.dense_index(moving)],
             versions[*f.state.body_pool.dense_index(fixed)]}, 5);
+    f.state.schedule.prepared = true;
     bool selected = true;
     REQUIRE(sqp::run_process_toi(f.state, 5, selected));
     CHECK_FALSE(selected);
+    CHECK_FALSE(f.state.broad_phase.freeze_retry);
+    CHECK(f.state.schedule.prepared);
     CHECK_FALSE(f.state.body_pool.island_of(fixed).has_value());
     CHECK(f.state.island_pool.frozen_until(f.island) == sqp::config::TU_PER_TICK);
 }

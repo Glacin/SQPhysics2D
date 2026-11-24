@@ -267,7 +267,26 @@ tick_t ceil_toi_time(tick_t start, tick_t end, real fraction) {
 bool run_narrow_phase(WorldState& state) {
     auto& output = state.narrow_phase;
     auto& pairs = state.pairs;
-    const auto& broad = state.broad_phase;
+    auto& broad = state.broad_phase;
+    const bool freeze_retry = broad.freeze_retry;
+    const bool reuse = freeze_retry && output.prepared_time == state.schedule.time &&
+                       output.prepared_end == state.interval.target_end &&
+                       output.ordinary_contact_keys.size() == pairs.pairs->size();
+
+    if (freeze_retry) {
+        // No TOI is selected during a retry, so the delayed columns can hold the prior rows.
+        if (reuse) {
+            pairs.pairs.swap(pairs.delayed_pairs);
+            pairs.manifolds.swap(pairs.delayed_manifolds);
+            output.ordinary_contact_keys.swap(output.previous_contact_keys);
+        }
+        pairs.pairs->clear();
+        pairs.manifolds->clear();
+        pairs.toi_local_contacts.clear();
+        pairs.original_manifolds.clear();
+        pairs.original_manifolds_valid = false;
+    }
+    output.ordinary_contact_keys.clear();
 
     if (broad.bodies.size() != broad.shapes.size())
         return stage_error(state, "candidate body and shape columns have inconsistent sizes");
@@ -287,7 +306,30 @@ bool run_narrow_phase(WorldState& state) {
         return entry;
     };
 
+    const auto append_ordinary = [&](BroadPhase::Pair key, const Pair& pair,
+                                     const ContactManifold& manifold) {
+        if (!pairs.manifolds->append(manifold))
+            return false;
+        pairs.pairs->push_back(pair);
+        output.ordinary_contact_keys.push_back(key);
+        return true;
+    };
+    const auto was_updated = [&](u32 index) {
+        return index < broad.selected.size() && broad.selected[index] == broad.selection_epoch;
+    };
+    std::size_t previous_row = 0;
     for (const BroadPhase::Pair candidate : broad.candidates) {
+        if (reuse && !was_updated(candidate.a) && !was_updated(candidate.b)) {
+            const auto& keys = output.previous_contact_keys;
+            while (previous_row < keys.size() && keys[previous_row] < candidate)
+                ++previous_row;
+            if (previous_row < keys.size() && keys[previous_row] == candidate &&
+                pairs.delayed_manifolds->counts[previous_row] != 0 &&
+                !append_ordinary(candidate, (*pairs.delayed_pairs)[previous_row],
+                                 pairs.delayed_manifolds->at(previous_row)))
+                return stage_error(state, "run_narrow_phase: failed to retain ordinary contact");
+            continue;
+        }
         if (candidate.a >= broad.bodies.size() || candidate.b >= broad.bodies.size() ||
             candidate.a == candidate.b)
             continue;
@@ -329,16 +371,15 @@ bool run_narrow_phase(WorldState& state) {
             body_a, body_b, a.shape, b.shape, cached_a.motion_version, cached_b.motion_version};
         if (mode_a == CastChoice::None && mode_b == CastChoice::None) {
             ContactManifold manifold;
-            if (overlaps(a, b, a.end, b.end, &manifold)) {
-                pairs.pairs->push_back(pair);
-                if (!pairs.manifolds->append(manifold)) {
-                    pairs.pairs->pop_back();
-                    return stage_error(state, "run_narrow_phase: check failed (!pairs.manifolds->append(manifold))");
-                }
-            }
+            if (overlaps(a, b, a.end, b.end, &manifold) &&
+                !append_ordinary(candidate, pair, manifold))
+                return stage_error(state, "run_narrow_phase: failed to append ordinary contact");
             continue;
         }
 
+#ifdef SQP_ENABLE_PERFORMANCE_PROFILING
+        state.stats.freeze_retry_sweeps += freeze_retry;
+#endif
         real fraction;
         Vec2 normal;
         const bool box_a = body_a.kind() == BodyConfigs::Kind::AabbBox;
@@ -442,6 +483,9 @@ bool run_narrow_phase(WorldState& state) {
                 b.linear_velocity, b.angular_velocity, normal);
 
             if (kinematics.normal_speed > real(0)) {
+#ifdef SQP_ENABLE_PERFORMANCE_PROFILING
+                state.stats.freeze_retry_sweeps += freeze_retry;
+#endif
                 const bool reentry = sweep_shape_pair_reentry_toi(
                     a.view, local_start_a.position, local_start_a.rotation, local_end_a.position,
                     local_end_a.rotation, b.view, local_start_b.position, local_start_b.rotation,
@@ -480,7 +524,19 @@ bool run_narrow_phase(WorldState& state) {
                                       impact_a.rotation, impact_b.rotation, true});
     }
 
-    state.broad_phase.candidates.clear();
+    if (reuse) {
+        pairs.delayed_pairs->clear();
+        pairs.delayed_manifolds->clear();
+        output.previous_contact_keys.clear();
+    }
+    output.prepared_time = state.schedule.time;
+    output.prepared_end = state.interval.target_end;
+    if (freeze_retry) {
+        broad.freeze_retry = false;
+        broad.reprepare_after_toi = false;
+        broad.toi_changed_islands.clear();
+    }
+    broad.candidates.clear();
 
     return true;
 }
