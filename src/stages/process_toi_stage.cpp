@@ -57,21 +57,40 @@ bool event_is_after_islands(const WorldState& state, const ToiEvent& event) {
                      : type_b == BodyConfigs::RegisterType::ImmutableStatic);
 }
 
+struct FrozenContact {
+    bool skip = false;
+    IslandId newly_frozen;
+};
+
 bool propagate_frozen_contact(WorldState& state, const Pair& pair, tick_t time,
-                              bool& propagated) {
-    propagated = false;
+                              FrozenContact& result) {
     const auto a = state.body_pool.island_of(pair.body_a);
     const auto b = state.body_pool.island_of(pair.body_b);
     const bool frozen_a = a && state.island_pool.frozen_until(*a) > time;
     const bool frozen_b = b && state.island_pool.frozen_until(*b) > time;
-    if (!frozen_a && !frozen_b)
+    result.skip = frozen_a || frozen_b;
+    if (frozen_a == frozen_b)
         return true;
-    if (frozen_a && b && !frozen_b && !freeze_island_until_next_tick(state, *b, time))
-        return stage_error(state, "propagate_frozen_contact: check failed (frozen_a && b && !frozen_b && !freeze_island_until_next_tick(state, *b, time))");
-    if (frozen_b && a && !frozen_a && !freeze_island_until_next_tick(state, *a, time))
-        return stage_error(state, "propagate_frozen_contact: check failed (frozen_b && a && !frozen_a && !freeze_island_until_next_tick(state, *a, time))");
-    propagated = true;
+    const auto neighbor = frozen_a ? b : a;
+    if (!neighbor)
+        return true;
+    if (!freeze_island_until_next_tick(state, *neighbor, time))
+        return false;
+    result.newly_frozen = *neighbor;
     return true;
+}
+
+void retry_after_freeze(WorldState& state, IslandId id) {
+    if (state.island_pool.get(id)->time > state.interval.target_end)
+        std::erase(*state.interval.islands, id);
+    auto& broad = state.broad_phase;
+    broad.toi_changed_islands.assign(1, id);
+    broad.reprepare_after_toi = true;
+    broad.freeze_retry = true;
+    state.schedule.prepared = false;
+#ifdef SQP_ENABLE_PERFORMANCE_PROFILING
+    ++state.stats.freeze_retries;
+#endif
 }
 
 bool event_has_budget(const WorldState& state, const ToiEvent& event) {
@@ -90,15 +109,6 @@ bool event_has_budget(const WorldState& state, const ToiEvent& event) {
     return true;
 }
 
-void append_event_islands(WorldState& state, const ToiEvent& event) {
-    for (BodyHandle body : {event.pair.body_a, event.pair.body_b}) {
-        BodyConfigs::RegisterType type;
-        state.body_pool.get_register_type(body, type);
-        if (type != BodyConfigs::RegisterType::ImmutableStatic)
-            state.process_toi.selected_islands.push_back(*state.body_pool.island_of(body));
-    }
-}
-
 bool pose_at(const WorldState& state, BodyHandle body, tick_t time, Vec2& position,
              real& rotation) {
     BodyState body_state;
@@ -107,15 +117,18 @@ bool pose_at(const WorldState& state, BodyHandle body, tick_t time, Vec2& positi
     const Island* island = id ? state.island_pool.get(*id) : nullptr;
     if (!state.body_pool.get_state(body, body_state) ||
         !state.body_pool.get_register_type(body, registration) ||
-        (registration != BodyConfigs::RegisterType::ImmutableStatic &&
-         (!island || island->time >= time)))
+        (registration != BodyConfigs::RegisterType::ImmutableStatic && !island))
         return false;
     position = body_state.position;
     rotation = body_state.rotation;
-    if (registration != BodyConfigs::RegisterType::ImmutableStatic)
+    if (registration != BodyConfigs::RegisterType::ImmutableStatic &&
+        state.island_pool.frozen_until(*id) <= time) {
+        if (island->time >= time)
+            return false;
         predict_body_state(body_state.position, body_state.rotation, body_state.linear_velocity,
                            body_state.angular_velocity, {}, real(0), time - island->time, position,
                            rotation);
+    }
     return true;
 }
 
@@ -139,8 +152,9 @@ bool support_feature(const detail::ShapeQueryView& shape, Vec2 position, real ro
     const auto* polygon = std::get_if<ConvexPoly>(&shape.geometry());
     if (!polygon || polygon->local.size() < 3)
         return false;
+    const Vec2 center = position + math::rotate_vector(polygon->center_offset(), rotation);
     const auto world_vertex = [&](std::size_t index) {
-        return position + math::rotate_vector(polygon->local[index], rotation);
+        return center + math::rotate_vector(polygon->local[index], rotation);
     };
     real maximum = -std::numeric_limits<real>::infinity();
     u16 best_index = 0;
@@ -290,9 +304,11 @@ bool run_process_toi(WorldState& state, tick_t bound, bool& selected_time) {
     };
     for (std::size_t i = 0; i < input.toi_pairs.size(); ++i) {
         const bool duplicate =
-            std::any_of(output.toi_heap.begin(), output.toi_heap.end(), [&](const ToiEvent& event) {
-                return event.time == input.toi_times[i] && event.pair == input.toi_pairs[i];
-            });
+            !output.toi_keys.insert({input.toi_times[i], input.toi_pairs[i]}).second;
+#ifdef SQP_ENABLE_PERFORMANCE_PROFILING
+        ++state.stats.toi_dedup_checks;
+        state.stats.toi_duplicates += duplicate;
+#endif
         if (!duplicate) {
             output.toi_heap.push_back(
                 {input.toi_times[i], input.toi_pairs[i], input.toi_normals[i],
@@ -310,18 +326,15 @@ bool run_process_toi(WorldState& state, tick_t bound, bool& selected_time) {
         for (std::size_t i = 0; i < pairs.pairs->size(); ++i) {
             if (pairs.manifolds->counts[i] == 0)
                 continue;
-            bool propagated = false;
-            if (!propagate_frozen_contact(state, (*pairs.pairs)[i], interval.target_end,
-                                          propagated))
-                return stage_error(state, "run_process_toi: check failed (!propagate_frozen_contact(state, (*pairs.pairs)[i], interval.target_end, propagated))");
-            if (propagated) {
-                std::erase_if(*interval.islands, [&](IslandId id) {
-                    return state.island_pool.frozen_until(id) > state.schedule.time &&
-                           state.island_pool.get(id)->time > interval.target_end;
-                });
-                state.schedule.prepared = false;
+            FrozenContact contact;
+            if (!propagate_frozen_contact(state, (*pairs.pairs)[i], interval.target_end, contact))
+                return false;
+            if (contact.newly_frozen.valid()) {
+                retry_after_freeze(state, contact.newly_frozen);
                 return true;
             }
+            if (contact.skip)
+                pairs.manifolds->counts[i] = 0;
         }
     }
 
@@ -329,10 +342,11 @@ bool run_process_toi(WorldState& state, tick_t bound, bool& selected_time) {
     if (state.interval.microstep)
         return true;
 
+    auto& staged = output.selected_events;
+    staged.clear();
     while (!output.toi_heap.empty() && output.toi_heap.front().time <= bound) {
         const tick_t earliest = output.toi_heap.front().time;
         bool valid_time = false;
-        output.selected_islands.clear();
         const auto restore_ordinary = [&] {
             if (!valid_time)
                 return;
@@ -347,58 +361,49 @@ bool run_process_toi(WorldState& state, tick_t bound, bool& selected_time) {
             std::pop_heap(output.toi_heap.begin(), output.toi_heap.end(), compare);
             ToiEvent event = output.toi_heap.back();
             output.toi_heap.pop_back();
+            output.toi_keys.erase({event.time, event.pair});
             if (event.time < state.schedule.time || !event_is_current(state, event))
                 continue;
             if (!event_is_after_islands(state, event))
                 continue;
-            bool propagated = false;
-            if (!propagate_frozen_contact(state, event.pair, event.time, propagated))
-                return stage_error(state, "run_process_toi: check failed (!propagate_frozen_contact(state, event.pair, event.time, propagated))");
-            if (propagated) {
+            ContactManifold manifold;
+            WorldState::ToiLocalContact local;
+            if (!event_manifold(state, event, manifold, local))
+                continue;
+            FrozenContact contact;
+            if (!propagate_frozen_contact(state, event.pair, event.time, contact))
+                return false;
+            if (contact.newly_frozen.valid()) {
                 restore_ordinary();
-                std::erase_if(*interval.islands, [&](IslandId id) {
-                    return state.island_pool.frozen_until(id) > state.schedule.time &&
-                           state.island_pool.get(id)->time > interval.target_end;
-                });
-                state.schedule.prepared = false;
+                // The retry recasts changed bodies. Untouched events retain their heap order.
+                for (const auto& prior : staged) {
+                    if (event_is_current(state, prior)) {
+                        output.toi_keys.insert({prior.time, prior.pair});
+                        output.toi_heap.push_back(prior);
+                        std::push_heap(output.toi_heap.begin(), output.toi_heap.end(), compare);
+                    }
+                }
+                staged.clear();
+                retry_after_freeze(state, contact.newly_frozen);
                 return true;
             }
-            if (!event_has_budget(state, event))
+            if (contact.skip || !event_has_budget(state, event))
                 continue;
             if (!valid_time) {
                 swap_active_delayed();
             }
             valid_time = true;
-            ContactManifold manifold;
-            WorldState::ToiLocalContact local;
-            if (!event_manifold(state, event, manifold, local))
-                continue;
             if (!pairs.manifolds->append(manifold)) {
                 restore_ordinary();
                 return stage_error(state, "run_process_toi: check failed (!pairs.manifolds->append(manifold))");
             }
             pairs.pairs->push_back(event.pair);
             pairs.toi_local_contacts.push_back(local);
-            append_event_islands(state, event);
+            staged.push_back(event);
         } while (!output.toi_heap.empty() && output.toi_heap.front().time == earliest);
 
-        // Skip there invalid interval so will not stuck in an infinite loop.
-        if (valid_time && pairs.pairs->empty() && output.selected_islands.empty()) {
-            restore_ordinary();
-            continue;
-        }
         if (valid_time) {
-            auto& islands = output.selected_islands;
-            std::sort(islands.begin(), islands.end(), [](IslandId a, IslandId b) {
-                return a.index != b.index ? a.index < b.index : a.generation < b.generation;
-            });
-            islands.erase(std::unique(islands.begin(), islands.end()), islands.end());
-            for (IslandId id : islands)
-                if (!state.island_pool.increment_toi_truncations(id)) {
-                    restore_ordinary();
-                    return stage_error(state, "run_process_toi: check failed (!state.island_pool.increment_toi_truncations(id))");
-                }
-            islands.clear();
+            staged.clear();
             state.interval.microstep = true;
             state.interval.tick = false;
             state.interval.microstep_time = earliest;

@@ -128,6 +128,7 @@ u64 hash_world_state(const WorldState& s) {
     h.sequence(s.broad_phase.interval_proxy_indices);
     h.sequence(s.broad_phase.selected); h.add(s.broad_phase.selection_epoch);
     h.sequence(s.broad_phase.toi_changed_islands); h.add(s.broad_phase.reprepare_after_toi);
+    h.add(s.broad_phase.freeze_retry);
     h.sequence(s.broad_phase.candidates); h.sequence(s.broad_phase.ordinary_candidates);
 
     sequence(h, s.process_toi.toi_heap, [&](const auto& v) {
@@ -135,6 +136,12 @@ u64 hash_world_state(const WorldState& s) {
         h.add(v.sequence); add(h, v.impact);
     });
     h.add(s.process_toi.next_sequence);
+    h.add(s.narrow_phase.prepared_time.has_value());
+    if (s.narrow_phase.prepared_time) {
+        h.add(*s.narrow_phase.prepared_time);
+        h.add(s.narrow_phase.prepared_end);
+    }
+    h.sequence(s.narrow_phase.ordinary_contact_keys);
     h.sequence(s.narrow_phase.toi_pairs);
     h.sequence(s.narrow_phase.toi_times); h.sequence(s.narrow_phase.toi_normals);
     sequence(h, s.narrow_phase.toi_impacts, [&](const auto& v) { add(h, v); });
@@ -164,6 +171,9 @@ u64 hash_world_state(const WorldState& s) {
     });
     h.add(s.schedule.time); h.add(s.schedule.step_target);
     h.add(s.schedule.ordinary_target); h.add(s.schedule.prepared);
+    h.add(s.schedule.last_ordinary_end.has_value());
+    if (s.schedule.last_ordinary_end)
+        h.add(*s.schedule.last_ordinary_end);
 
     sequence(h, s.solve.contact_cache, [&](const auto& v) {
         h.add(v.body_a); h.add(v.body_b); h.add(v.shape_a); h.add(v.shape_b);
@@ -173,7 +183,10 @@ u64 hash_world_state(const WorldState& s) {
         h.add(v.normal); h.add(v.step_seconds); h.add(v.time); h.add(v.count);
     });
     sequence(h, s.solve.processed_islands, [&](const auto& v) {
-        h.add(v.id); h.add(v.start); h.add(v.end);
+        h.add(v.id);
+        h.add(v.start);
+        h.add(v.end);
+        h.add(v.received_toi_impulse);
     });
     h.add(s.callbacks.pre_solve != nullptr); h.add(s.callbacks.post_solve != nullptr);
     h.add(s.callbacks.pre_data != nullptr); h.add(s.callbacks.post_data != nullptr);

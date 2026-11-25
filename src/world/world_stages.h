@@ -40,7 +40,8 @@ bool run_pre_solve(WorldState& state);
 bool run_solve(WorldState& state);
 // Solve-owned no-contact integration used before time-stamped command mutations.
 bool run_advance_islands(WorldState& state, std::span<const IslandId> islands, tick_t target);
-bool freeze_island_until_next_tick(WorldState& state, IslandId id, tick_t now);
+bool freeze_island_until_next_tick(WorldState& state, IslandId id, tick_t now,
+                                   bool exhausted = false);
 
 // Collect islands, change islands' interval, sleep on / off.
 bool run_collect_tasks(WorldState& state);

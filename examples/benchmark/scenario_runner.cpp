@@ -105,9 +105,12 @@ Result run(Scenario& scenario, const Options& options) {
     if (options.proxy_extension_ratio)
         context.settings.broad_phase.proxy_extension_ratio = *options.proxy_extension_ratio;
     context.settings.allow_sleep = options.allow_sleep;
+    if (options.toi_budget)
+        context.settings.interval.max_truncations_per_tick = *options.toi_budget;
     context.settings.sanitize();
     context.state.settings = context.settings;
     std::vector<TickHash> tick_hashes;
+    context.state.stats.record_body_freezes = options.freeze_stats;
 
     const auto step = [&](tick_t tick, const char* phase) {
         if (!context.world.step(config::TU_PER_TICK))
@@ -136,7 +139,14 @@ Result run(Scenario& scenario, const Options& options) {
         progress.show_tick("warmup", tick, options.warmup_ticks);
     }
 
+    const tick_t measure_start = context.world.time_tu();
+    auto body_freezes = std::move(context.state.stats.body_freezes);
+    std::erase_if(body_freezes,
+                  [measure_start](const auto& freeze) { return freeze.end <= measure_start; });
     context.state.stats = {};
+    context.state.stats.record_toi_outcomes = options.toi_stats;
+    context.state.stats.record_body_freezes = options.freeze_stats;
+    context.state.stats.body_freezes = std::move(body_freezes);
 
     std::vector<double> times;
     times.reserve(static_cast<std::size_t>(options.measure_ticks));
@@ -207,7 +217,15 @@ Result run(Scenario& scenario, const Options& options) {
     result.p95_tick_ms = percentile_ms(times, 0.95);
     result.max_tick_ms = *std::max_element(times.begin(), times.end());
     result.total_step_ms = total_seconds * 1000.0;
-    result.stage_stats = context.state.stats;
+    const tick_t measure_end = context.world.time_tu();
+    auto& freezes = context.state.stats.body_freezes;
+    std::erase_if(freezes,
+                  [measure_end](const auto& freeze) { return freeze.start >= measure_end; });
+    for (auto& freeze : freezes) {
+        freeze.start = std::max(freeze.start, measure_start);
+        freeze.end = std::min(freeze.end, measure_end);
+    }
+    result.stage_stats = std::move(context.state.stats);
 #ifdef SQP_ENABLE_PERFORMANCE_PROFILING
     const double tick_count = static_cast<double>(options.measure_ticks);
     result.tick_averages.intervals = measured_totals.intervals / tick_count;

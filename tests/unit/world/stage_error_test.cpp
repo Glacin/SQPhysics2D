@@ -57,7 +57,7 @@ TEST_CASE("Every built-in stage reports a specific failure", "[world][stage_erro
         state.interval.microstep = true;
         state.interval.microstep_time = std::numeric_limits<sqp::tick_t>::max();
         state.settings.interval.max_truncations_per_tick = 0;
-        state.solve.processed_islands.push_back({island, 0, 0});
+        state.solve.processed_islands.push_back({island, 0, 0, true});
         CHECK_FALSE(sqp::run_advance_interval(state));
         CHECK(state.stage_error_detail.find("overflow") != std::string::npos);
     }

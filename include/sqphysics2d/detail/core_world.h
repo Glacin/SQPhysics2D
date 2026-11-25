@@ -20,6 +20,8 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace sqp {
@@ -134,6 +136,20 @@ struct WorldState {
 #endif
         };
         u64 intervals = 0;
+        struct BodyFreeze {
+            BodyHandle body;
+            tick_t start = 0, end = 0;
+            bool exhausted = false;
+        };
+        bool record_body_freezes = false;
+        std::vector<BodyFreeze> body_freezes;
+        struct ToiOutcomes {
+            u64 microsteps = 0, effective_microsteps = 0;
+            u64 islands = 0, charged_islands = 0;
+            u64 selected_pairs = 0, solved_pairs = 0, effective_pairs = 0;
+            u64 approaching_contact_pairs = 0;
+        } toi_outcomes;
+        bool record_toi_outcomes = false;
         std::array<Entry, stage_count> stages{};
 #ifdef SQP_ENABLE_PERFORMANCE_PROFILING
         u64 pending_candidates = 0;
@@ -143,6 +159,18 @@ struct WorldState {
         u64 pending_nodes_visited = 0;
         u64 pending_proxy_reinsertions = 0;
         u64 pending_query_calls = 0;
+        u64 freeze_retries = 0;
+        u64 freeze_retry_queries = 0;
+        u64 freeze_retry_sweeps = 0;
+        u64 narrow_sweeps = 0;
+        u64 narrow_dimension_requests = 0;
+        u64 narrow_dimension_loads = 0;
+        u64 narrow_start_predictions = 0;
+        u64 narrow_reused_start_predictions = 0;
+        u64 narrow_reused_results = 0;
+        u64 toi_dedup_checks = 0;
+        u64 toi_duplicates = 0;
+        u64 constraint_prepare_nanoseconds = 0;
         std::vector<IntervalEntry> interval_entries;
 #endif
     } stats;
@@ -218,9 +246,10 @@ struct WorldState {
         std::vector<u32> interval_proxy_indices;
         std::vector<u32> selected;
         u32 selection_epoch = 0;
-        // After a TOI microstep, only these islands changed their predicted sweep.
+        // Islands whose proxy sweeps changed during TOI solving or freeze propagation.
         std::vector<IslandId> toi_changed_islands;
         bool reprepare_after_toi = false;
+        bool freeze_retry = false;
 
         // Output of BroadPhase stage.
         std::vector<BroadPhase::Pair> candidates;
@@ -256,7 +285,13 @@ struct WorldState {
             BodyHandle body;
             ShapeHandle shape;
             detail::ShapeQueryView view;
-            Pose source, end;
+            Pose source, end, predicted_start;
+            tick_t predicted_start_time = 0;
+            bool frozen = false;
+            real sweep_radius = 0;
+            bool dimensions_loaded = false;
+            real radius = 0;
+            Vec2 half_extents;
             Vec2 linear_velocity;
             real angular_velocity = 0;
             BodyConfiguration configuration;
@@ -267,6 +302,30 @@ struct WorldState {
         // Indexed by broad_phase.bodies; entries are valid only for the current stage run.
         std::vector<CandidateCacheEntry> candidate_cache;
         u32 candidate_cache_epoch = 0;
+
+        struct SweepHit {
+            tick_t time;
+            Vec2 normal;
+            ToiLocalImpact impact;
+        };
+        struct PairResult {
+            BroadPhase::Pair candidate;
+            Pair pair;
+            tick_t start_time = 0;
+            u8 modes = 0;
+            u8 frozen = 0;
+            // Absolute endpoints, followed by start poses and velocities for a sweep.
+            std::array<real, 18> motion{};
+            std::variant<std::monostate, ContactManifold, SweepHit> result;
+        };
+        std::vector<PairResult> pair_results, next_pair_results;
+        tick_t pair_result_end = 0;
+
+        // Ordinary contact rows are reusable only within the same prepared time span.
+        std::optional<tick_t> prepared_time;
+        tick_t prepared_end = 0;
+        std::vector<BroadPhase::Pair> ordinary_contact_keys;
+        std::vector<BroadPhase::Pair> previous_contact_keys;
 
         // Aligned TOI event columns; toi_impacts records the unrounded impact pose.
         std::vector<Pair> toi_pairs;
@@ -295,10 +354,24 @@ struct WorldState {
             }
         };
 
+        struct EventKey {
+            tick_t time;
+            Pair pair;
+            bool operator==(const EventKey&) const = default;
+        };
+        struct EventKeyHash {
+            std::size_t operator()(const EventKey& key) const noexcept {
+                using Hash = detail::ContactPairHash;
+                const u64 shapes = Hash::mix(key.pair.shape_a.index, key.pair.shape_b.index);
+                return static_cast<std::size_t>(Hash::mix(shapes, key.time));
+            }
+        };
+
         // Future events survive interval changes and are revalidated before use.
         std::vector<ToiEvent> toi_heap;
-        std::vector<IslandId> selected_islands;
+        std::unordered_set<EventKey, EventKeyHash> toi_keys;
         u64 next_sequence = 0;
+        std::vector<ToiEvent> selected_events;
 
     } process_toi;
 
@@ -317,6 +390,13 @@ struct WorldState {
         std::vector<ToiLocalContact> delayed_toi_local_contacts;
         ContactManifolds delayed_original_manifolds;
         bool delayed_original_manifolds_valid = false;
+
+        struct PreSolveScratch {
+            ContactManifolds manifolds;
+            std::vector<ToiLocalContact> local_contacts;
+            std::vector<real> restitution, dynamic_friction, static_friction;
+            std::vector<real> damping, frequency, correction_speed;
+        } pre_solve_scratch;
 
         // PreSolve material output; every column has the same row index as pairs.
         std::vector<real> combined_damping_ratios;
@@ -359,6 +439,7 @@ struct WorldState {
         tick_t time = 0;
         tick_t step_target = 0;
         tick_t ordinary_target = 0;
+        std::optional<tick_t> last_ordinary_end;
         bool prepared = false;
     } schedule;
 
@@ -376,10 +457,14 @@ struct WorldState {
         };
         // Persists independently of the interval's active and delayed pair columns.
         std::vector<ContactCacheEntry> contact_cache;
+        std::unordered_map<detail::ContactPairKey, std::size_t, detail::ContactPairHash>
+            contact_cache_index;
+        std::vector<std::size_t> constraint_cache_slots;
         struct ProcessedIsland {
             IslandId id;
             tick_t start = 0;
             tick_t end = 0;
+            bool received_toi_impulse = false;
         };
         std::vector<ProcessedIsland> processed_islands;
         // Rebuilt each invocation; storage capacity is retained across intervals.

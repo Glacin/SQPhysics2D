@@ -9,7 +9,7 @@
 
 namespace sqp {
 
-bool freeze_island_until_next_tick(WorldState& state, IslandId id, tick_t now) {
+bool freeze_island_until_next_tick(WorldState& state, IslandId id, tick_t now, bool exhausted) {
     const Island* island = state.island_pool.get(id);
     if (!island)
         return stage_error(state, "freeze_island_until_next_tick: island does not exist");
@@ -22,6 +22,7 @@ bool freeze_island_until_next_tick(WorldState& state, IslandId id, tick_t now) {
     if (now > std::numeric_limits<tick_t>::max() - offset)
         return stage_error(state, "next tick time would overflow");
     const tick_t until = now + offset;
+    const tick_t start = island->time;
     if (!state.island_pool.set_time(id, until) ||
         !state.island_pool.set_frozen_until(id, until))
         return stage_error(state, "freeze_island_until_next_tick: check failed (!state.island_pool.set_time(id, until) || !state.island_pool.set_frozen_until(id, until))");
@@ -33,6 +34,8 @@ bool freeze_island_until_next_tick(WorldState& state, IslandId id, tick_t now) {
         if (*dense >= versions.size())
             return stage_error(state, "freeze_island_until_next_tick: check failed (*dense >= versions.size())");
         ++versions[*dense];
+        if (state.stats.record_body_freezes && start < until)
+            state.stats.body_freezes.push_back({body, start, until, exhausted});
         return true;
     };
     if (const auto* small = std::get_if<Island::SmallIsland>(&island->bodies)) {
@@ -57,6 +60,8 @@ void clear_active_interval_data(WorldState& state) {
     state.pairs.original_manifolds.clear();
     state.pairs.original_manifolds_valid = false;
     state.broad_phase.candidates.clear();
+    state.narrow_phase.prepared_time.reset();
+    state.narrow_phase.ordinary_contact_keys.clear();
     state.narrow_phase.toi_pairs.clear();
     state.narrow_phase.toi_times.clear();
     state.narrow_phase.toi_normals.clear();
@@ -70,11 +75,12 @@ bool run_advance_interval(WorldState& state) {
         schedule.time = interval.microstep_time;
         for (const auto& processed : state.solve.processed_islands) {
             const IslandId id = processed.id;
-            if (state.island_pool.get(id) &&
+            if (processed.received_toi_impulse && state.island_pool.get(id) &&
                 state.island_pool.toi_truncations(id) >=
                     state.settings.interval.max_truncations_per_tick &&
-                !freeze_island_until_next_tick(state, id, schedule.time))
-                return stage_error(state, "run_advance_interval: check failed (state.island_pool.get(id) && state.island_pool.toi_truncations(id) >= state.settings.interval.max_truncations_per_tick && !freeze_island_until_next_tick(state, id, schedule.time))");
+                !freeze_island_until_next_tick(state, id, schedule.time, /*exhausted=*/true))
+                return stage_error(state,
+                                   "run_advance_interval: failed to freeze exhausted island");
         }
         clear_active_interval_data(state);
         state.pairs.pairs.swap(state.pairs.delayed_pairs);
@@ -100,7 +106,8 @@ bool run_advance_interval(WorldState& state) {
         broad.toi_changed_islands.clear();
         for (const auto& processed : state.solve.processed_islands)
             if (const Island* island = state.island_pool.get(processed.id);
-                island && island->time <= interval.target_end)
+                island && (island->time <= interval.target_end ||
+                           state.island_pool.frozen_until(processed.id) > schedule.time))
                 broad.toi_changed_islands.push_back(processed.id);
         broad.reprepare_after_toi = true;
         clear_active_interval_data(state);
@@ -114,6 +121,7 @@ bool run_advance_interval(WorldState& state) {
         return true;
     }
     schedule.time = interval.target_end;
+    schedule.last_ordinary_end = interval.target_end;
     if (interval.tick) {
         state.island_pool.reset_toi_truncations();
         std::vector<IslandId> ids;

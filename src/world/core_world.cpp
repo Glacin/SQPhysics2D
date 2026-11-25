@@ -157,7 +157,8 @@ bool CoreWorld::step_until(tick_t target) {
     const auto prepare_ordinary = [&] {
         if (schedule.prepared || schedule.ordinary_target == std::numeric_limits<tick_t>::max())
             return true;
-        clear_active_interval_data(state);
+        if (!state.broad_phase.freeze_retry)
+            clear_active_interval_data(state);
         state.interval.target_end = schedule.ordinary_target;
         if (!run_stage(state, Stage::BroadPhase, [&] { return run_broad_phase(state); }) ||
             !run_stage(state, Stage::NarrowPhase, [&] { return run_narrow_phase(state); }))
@@ -280,7 +281,8 @@ CoreWorld::StageId CoreWorld::process_toi(VirtualWorld& world) {
     if (selected_time)
         return core.stage_id(StageRole::ProcessCommand);
     if (!core.world_state_.schedule.prepared) {
-        clear_active_interval_data(core.world_state_);
+        if (!core.world_state_.broad_phase.freeze_retry)
+            clear_active_interval_data(core.world_state_);
         return core.stage_id(StageRole::BroadPhase);
     }
     if (core.world_state_.interval.microstep)

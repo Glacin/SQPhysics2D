@@ -9,8 +9,10 @@
 #include <cmath>
 #include <exception>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 
 #ifdef _WIN32
 #include <io.h>
@@ -53,7 +55,8 @@ void usage() {
     std::fprintf(stderr, "usage: sqphysics2d_benchmark SCENARIO [--bodies N] [--seed N] "
                          "[--warmup N] [--ticks N] [--sleep on|off] "
                          "[--initial-sleep on|off] [--awake-bodies N] "
-                         "[--proxy-extension-ratio 0..1] [--detail] [--check-determinism]\n"
+                         "[--proxy-extension-ratio 0..1] [--toi-budget N] [--detail] "
+                         "[--freeze-stats] [--toi-stats] [--check-determinism]\n"
                          "scenarios: box_free_motion, box_floor_sleep, aabb_box_pyramid, "
                          "rigid_box_pyramid, circle_box_bounce, convex_polygon_bounce, "
                          "mixed_shape_bounce\n"
@@ -74,6 +77,65 @@ bool color_output() {
 #endif
 }
 #endif
+
+void print_freeze_stats(std::span<const sqp::WorldState::StageStats::BodyFreeze> freezes) {
+    using BodyKey = std::tuple<sqp::BodyConfigs::Kind, sqp::u32, sqp::u32>;
+    struct Summary {
+        std::map<BodyKey, sqp::tick_t> by_body;
+
+        void print(const char* name) const {
+            sqp::tick_t maximum = 0;
+            long double total = 0;
+            BodyKey max_body{};
+            for (const auto& [body, skipped] : by_body) {
+                total += skipped;
+                if (skipped > maximum) {
+                    maximum = skipped;
+                    max_body = body;
+                }
+            }
+            const long double average = by_body.empty() ? 0 : total / by_body.size();
+            constexpr long double ms_per_tu = 1000.0L / sqp::config::TU_PER_SECOND;
+            std::printf("%s_bodies=%zu average_skipped_tu=%.3f average_skipped_ms=%.6f "
+                        "total_skipped_ms=%.6f",
+                        name, by_body.size(), static_cast<double>(average),
+                        static_cast<double>(average * ms_per_tu),
+                        static_cast<double>(total * ms_per_tu));
+            if (!by_body.empty()) {
+                const auto [kind, index, generation] = max_body;
+                std::printf(" max_body=(%u,%u,%u) max_skipped_tu=%llu max_skipped_ms=%.6f",
+                            static_cast<unsigned>(kind), static_cast<unsigned>(index),
+                            static_cast<unsigned>(generation),
+                            static_cast<unsigned long long>(maximum),
+                            static_cast<double>(maximum * ms_per_tu));
+            }
+            std::printf("\n");
+        }
+    };
+    Summary exhausted, all;
+    for (const auto& freeze : freezes) {
+        const BodyKey body{freeze.body.kind(), freeze.body.index(), freeze.body.generation};
+        const auto skipped = freeze.end - freeze.start;
+        all.by_body[body] += skipped;
+        if (freeze.exhausted)
+            exhausted.by_body[body] += skipped;
+    }
+    exhausted.print("exhausted");
+    all.print("all_frozen");
+}
+
+void print_toi_stats(const sqp::WorldState::StageStats::ToiOutcomes& stats) {
+    const auto print = [](const char* label, sqp::u64 effective, sqp::u64 total) {
+        const double percent = total ? 100.0 * double(effective) / double(total) : 0;
+        std::printf("%s=%llu/%llu (%.4f%%)\n", label, static_cast<unsigned long long>(effective),
+                    static_cast<unsigned long long>(total), percent);
+    };
+    print("toi_effective_pairs", stats.effective_pairs, stats.selected_pairs);
+    print("toi_solved_pairs", stats.solved_pairs, stats.selected_pairs);
+    print("toi_approaching_contact_pairs", stats.approaching_contact_pairs, stats.selected_pairs);
+    print("toi_effective_microsteps", stats.effective_microsteps, stats.microsteps);
+    print("toi_charged_islands", stats.charged_islands, stats.islands);
+}
 
 void print_detail(const sqp::benchmark::Result& result) {
     constexpr std::array<const char*, sqp::WorldState::StageStats::stage_count> names = {
@@ -107,6 +169,27 @@ void print_detail(const sqp::benchmark::Result& result) {
 #endif
     }
 #ifdef SQP_ENABLE_PERFORMANCE_PROFILING
+    const auto& stats = result.stage_stats;
+    std::printf("freeze_retries=%llu freeze_retry_queries=%llu freeze_retry_sweeps=%llu\n",
+                static_cast<unsigned long long>(stats.freeze_retries),
+                static_cast<unsigned long long>(stats.freeze_retry_queries),
+                static_cast<unsigned long long>(stats.freeze_retry_sweeps));
+
+    std::printf("narrow_sweeps=%llu narrow_reused_results=%llu toi_dedup_checks=%llu "
+                "toi_duplicates=%llu constraint_prepare_ms=%.6f\n",
+                static_cast<unsigned long long>(stats.narrow_sweeps),
+                static_cast<unsigned long long>(stats.narrow_reused_results),
+                static_cast<unsigned long long>(stats.toi_dedup_checks),
+                static_cast<unsigned long long>(stats.toi_duplicates),
+                static_cast<double>(stats.constraint_prepare_nanoseconds) / 1'000'000.0);
+
+    std::printf("narrow_dimension_requests=%llu narrow_dimension_loads=%llu "
+                "narrow_start_predictions=%llu narrow_reused_start_predictions=%llu\n",
+                static_cast<unsigned long long>(stats.narrow_dimension_requests),
+                static_cast<unsigned long long>(stats.narrow_dimension_loads),
+                static_cast<unsigned long long>(stats.narrow_start_predictions),
+                static_cast<unsigned long long>(stats.narrow_reused_start_predictions));
+
     const auto& average = result.tick_averages;
     std::printf("\n%-16s %16s %16s %16s %16s %16s\n", "tick_average", "intervals",
                 "active_islands", "active_bodies", "candidates", "pairs");
@@ -161,13 +244,22 @@ int main(int argc, char** argv) {
             options.detail = true;
             continue;
         }
+        if (argument == "--freeze-stats") {
+            options.freeze_stats = true;
+            continue;
+        }
+        if (argument == "--toi-stats") {
+            options.toi_stats = true;
+            continue;
+        }
         if (argument == "--check-determinism") {
             options.check_determinism = true;
             continue;
         }
         if (argument != "--bodies" && argument != "--seed" && argument != "--warmup" &&
             argument != "--ticks" && argument != "--sleep" && argument != "--initial-sleep" &&
-            argument != "--awake-bodies" && argument != "--proxy-extension-ratio") {
+            argument != "--awake-bodies" && argument != "--proxy-extension-ratio" &&
+            argument != "--toi-budget") {
             std::fprintf(stderr, "unknown option: %s\n", argument.c_str());
             return 1;
         }
@@ -213,6 +305,12 @@ int main(int argc, char** argv) {
                 options.seed = static_cast<u32>(value);
             else
                 options.awake_bodies = static_cast<u32>(value);
+        } else if (argument == "--toi-budget") {
+            if (value == 0 || value > std::numeric_limits<u32>::max()) {
+                std::fprintf(stderr, "toi-budget must be a positive u32\n");
+                return 1;
+            }
+            options.toi_budget = static_cast<u32>(value);
         } else if (argument == "--warmup") {
             options.warmup_ticks = value;
         } else if (argument == "--ticks") {
@@ -256,6 +354,12 @@ int main(int argc, char** argv) {
                     result.name.c_str(), result.simulation_percent, result.ticks_per_second,
                     result.avg_ms_tick, result.p50_tick_ms, result.p75_tick_ms, result.p95_tick_ms,
                     result.max_tick_ms);
+        if (options.toi_budget)
+            std::printf("toi_budget=%u\n", static_cast<unsigned>(*options.toi_budget));
+        if (options.freeze_stats)
+            print_freeze_stats(result.stage_stats.body_freezes);
+        if (options.toi_stats)
+            print_toi_stats(result.stage_stats.toi_outcomes);
         if (options.detail) {
             for (std::size_t row = 0; row < result.final_layer_drift.size(); ++row)
                 std::printf("layer_%zu_horizontal_drift_half=%.6f final=%.6f\n", row,

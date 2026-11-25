@@ -6,6 +6,9 @@
 #include "solver/integration.h"
 
 #include <algorithm>
+#ifdef SQP_ENABLE_PERFORMANCE_PROFILING
+#include <chrono>
+#endif
 #include <cmath>
 #include <limits>
 #include <utility>
@@ -66,37 +69,28 @@ bool valid_manifold(const ContactManifold& manifold) {
     return true;
 }
 
-bool same_contact_pair(const WorldState::SolveData::ContactCacheEntry& entry,
-                       const Pair& pair) {
-    return entry.body_a == pair.body_a && entry.body_b == pair.body_b &&
-           entry.shape_a == pair.shape_a && entry.shape_b == pair.shape_b;
-}
+constexpr std::size_t no_cache_slot = std::numeric_limits<std::size_t>::max();
 
-void restore_contact_impulses(const WorldState::SolveData& solve, const Pair& pair,
+void restore_contact_impulses(const WorldState::SolveData& solve, std::size_t slot,
                               const ContactManifold& manifold, tick_t start, real step_seconds,
                               ContactConstraint& constraint) {
-    const auto found = std::find_if(solve.contact_cache.begin(), solve.contact_cache.end(),
-                                    [&](const auto& entry) {
-                                        return same_contact_pair(entry, pair);
-                                    });
-    if (found == solve.contact_cache.end() || found->time != start ||
-        math::dot(found->normal, constraint.normal) < real(0.95))
+    if (slot == no_cache_slot)
         return;
-    const real ratio = found->step_seconds > real(0)
-                           ? step_seconds / found->step_seconds
-                           : real(0);
+    const auto& cached = solve.contact_cache[slot];
+    if (cached.time != start || math::dot(cached.normal, constraint.normal) < real(0.95))
+        return;
+    const real ratio = cached.step_seconds > real(0) ? step_seconds / cached.step_seconds : real(0);
     const real warm_scale = std::isfinite(ratio) && ratio > real(0) ? ratio : real(0);
     bool used[2] = {};
     for (i32 i = 0; i < constraint.count; ++i) {
-        for (u8 j = 0; j < found->count; ++j) {
-            if (used[j] || found->keys[j] != manifold.points[i].key)
+        for (u8 j = 0; j < cached.count; ++j) {
+            if (used[j] || cached.keys[j] != manifold.points[i].key)
                 continue;
             auto& point = constraint.points[i];
-            point.normal_impulse = std::max(real(0), found->normal_impulses[j] * warm_scale);
-            point.tangent_impulse = std::clamp(
-                found->tangent_impulses[j] * warm_scale,
-                -constraint.static_friction * point.normal_impulse,
-                constraint.static_friction * point.normal_impulse);
+            point.normal_impulse = std::max(real(0), cached.normal_impulses[j] * warm_scale);
+            point.tangent_impulse = std::clamp(cached.tangent_impulses[j] * warm_scale,
+                                               -constraint.static_friction * point.normal_impulse,
+                                               constraint.static_friction * point.normal_impulse);
             point.restitution_velocity = 0;
             used[j] = true;
             break;
@@ -105,12 +99,16 @@ void restore_contact_impulses(const WorldState::SolveData& solve, const Pair& pa
 }
 
 void save_contact_impulses(WorldState::SolveData& solve, const Pair& pair,
-                          const ContactManifold& manifold, const ContactConstraint& constraint,
-                          tick_t target, real step_seconds) {
-    auto found = std::find_if(solve.contact_cache.begin(), solve.contact_cache.end(),
-                              [&](const auto& entry) {
-                                  return same_contact_pair(entry, pair);
-                              });
+                           const ContactManifold& manifold, const ContactConstraint& constraint,
+                           tick_t target, real step_seconds, std::size_t slot) {
+    auto& cache = solve.contact_cache;
+    auto& index = solve.contact_cache_index;
+    const auto key = detail::contact_pair_key(pair);
+    // Duplicate rows can create or erase a slot after preparation.
+    if (slot == no_cache_slot || cache[slot].count == 0) {
+        const auto found = index.find(key);
+        slot = found == index.end() ? no_cache_slot : found->second;
+    }
     WorldState::SolveData::ContactCacheEntry entry;
     entry.body_a = pair.body_a;
     entry.body_b = pair.body_b;
@@ -131,19 +129,20 @@ void save_contact_impulses(WorldState::SolveData& solve, const Pair& pair,
         entry.normal_impulses[slot] = point.normal_impulse;
         entry.tangent_impulses[slot] = point.tangent_impulse;
     }
-    if (found != solve.contact_cache.end()) {
+    if (slot != no_cache_slot) {
+        cache[slot] = entry;
         if (entry.count == 0)
-            solve.contact_cache.erase(found);
-        else
-            *found = entry;
+            index.erase(key);
     } else if (entry.count > 0) {
-        solve.contact_cache.push_back(entry);
+        index.emplace(key, cache.size());
+        cache.push_back(entry);
     }
 }
 
 void prune_contact_cache(WorldState& state) {
     auto& cache = state.solve.contact_cache;
-    std::erase_if(cache, [&](const auto& entry) {
+    auto& index = state.solve.contact_cache_index;
+    const auto expired = [&](const auto& entry) {
         if (!state.body_pool.is_valid(entry.body_a) ||
             !state.body_pool.is_valid(entry.body_b) ||
             !state.shape_pool.is_valid(entry.shape_a) ||
@@ -155,7 +154,23 @@ void prune_contact_cache(WorldState& state) {
             return value && value->time > entry.time;
         };
         return advanced(entry.body_a) || advanced(entry.body_b);
-    });
+    };
+    std::size_t write = 0;
+    for (std::size_t read = 0; read < cache.size(); ++read) {
+        const auto& entry = cache[read];
+        if (entry.count == 0)
+            continue;
+        if (expired(entry)) {
+            index.erase(detail::contact_pair_key(entry));
+            continue;
+        }
+        if (write != read) {
+            cache[write] = entry;
+            index[detail::contact_pair_key(entry)] = write;
+        }
+        ++write;
+    }
+    cache.resize(write);
 }
 
 bool add_island(WorldState& state, IslandId id, tick_t target) {
@@ -493,10 +508,15 @@ bool run_solve(WorldState& state) {
         return stage_error(state, "run_solve: check failed (!prepare_components(state, target, steps))");
 
     const std::size_t count = pairs.pairs->size();
+#ifdef SQP_ENABLE_PERFORMANCE_PROFILING
+    const auto prepare_begin = std::chrono::steady_clock::now();
+#endif
     state.post_solve.reports.clear();
     solve.constraints.reserve(count);
     solve.constraint_pair_indices.reserve(count);
     solve.prepared.reserve(count);
+    solve.constraint_cache_slots.clear();
+    solve.constraint_cache_slots.reserve(count);
 
     if (!state.interval.microstep) {
         for (std::size_t i = 0; i < solve.bodies.size(); ++i) {
@@ -565,9 +585,13 @@ bool run_solve(WorldState& state) {
                                     h, false, state.settings.contact.restitution_threshold_m_s);
         if (constraint.count != manifold.count)
             return stage_error(state, "run_solve: check failed (constraint.count != manifold.count)");
-        restore_contact_impulses(solve, pair,
-                                 local ? pairs.toi_local_contacts[i].manifold : manifold,
-                                 start, h, constraint);
+        const auto cached = solve.contact_cache_index.find(detail::contact_pair_key(pair));
+        const std::size_t slot =
+            cached == solve.contact_cache_index.end() ? no_cache_slot : cached->second;
+        solve.constraint_cache_slots.push_back(slot);
+        restore_contact_impulses(solve, slot,
+                                 local ? pairs.toi_local_contacts[i].manifold : manifold, start, h,
+                                 constraint);
         solve.constraints.push_back(std::move(constraint));
         solve.constraint_pair_indices.push_back(i);
         solve.constraint_step_seconds.push_back(h);
@@ -577,6 +601,12 @@ bool run_solve(WorldState& state) {
         if (!prepare_contact_runtime(state.body_pool, solve.constraints[i], solve.prepared[i]))
             return stage_error(state, "run_solve: check failed (!prepare_contact_runtime(state.body_pool, solve.constraints[i], solve.prepared[i]))");
 
+#ifdef SQP_ENABLE_PERFORMANCE_PROFILING
+    state.stats.constraint_prepare_nanoseconds +=
+        static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             std::chrono::steady_clock::now() - prepare_begin)
+                             .count());
+#endif
     const u32 iterations = std::max(1u, state.settings.contact.velocity_iterations);
     // Allow up to penetration_slop_m of overlap before applying penetration-correction bias.
     constexpr real penetration_slop_m = real(0);
@@ -585,19 +615,6 @@ bool run_solve(WorldState& state) {
             for (std::size_t i = 0; i < solve.bodies.size(); ++i)
                 if (!advance_velocity(state, solve.bodies[i], solve.body_step_seconds[i]))
                     return stage_error(state, "run_solve: check failed (!advance_velocity(state, solve.bodies[i], solve.body_step_seconds[i]))");
-        for (std::size_t i = 0; i < solve.constraints.size(); ++i) {
-            auto& constraint = solve.constraints[i];
-            const real h = solve.constraint_step_seconds[i];
-            const std::size_t row = solve.constraint_pair_indices[i];
-            constraint.inverse_h = real(1) / h;
-            const real hz = pairs.combined_contact_frequencies[row];
-            const bool fixed_a =
-                std::max(constraint.inverse_mass_a.x, constraint.inverse_mass_a.y) == real(0);
-            const bool fixed_b =
-                std::max(constraint.inverse_mass_b.x, constraint.inverse_mass_b.y) == real(0);
-            constraint.softness = make_contact_softness((fixed_a || fixed_b) ? real(2) * hz : hz,
-                                                        pairs.combined_damping_ratios[row], h);
-        }
         for (auto& prepared : solve.prepared)
             warm_start_contact(prepared);
         for (u32 pass = 0; pass < iterations; ++pass)
@@ -616,19 +633,42 @@ bool run_solve(WorldState& state) {
     for (IslandId id : solve.islands)
         if (!state.island_pool.set_time(id, target))
             return stage_error(state, "run_solve: check failed (!state.island_pool.set_time(id, target))");
+    const bool record_toi = state.interval.microstep && state.stats.record_toi_outcomes;
+    u64 effective_pairs = 0, approaching_pairs = 0;
     for (std::size_t i = 0; i < solve.prepared.size(); ++i) {
         auto& prepared = solve.prepared[i];
         apply_contact_restitution(prepared);
         const std::size_t row = solve.constraint_pair_indices[i];
         const Pair& pair = (*pairs.pairs)[row];
+        const auto& constraint = *prepared.constraint;
+        if (state.interval.microstep &&
+            std::any_of(constraint.points, constraint.points + constraint.count,
+                        [](const ContactConstraintPoint& point) {
+                            return point.normal_impulse > real(0) ||
+                                   point.tangent_impulse != real(0);
+                        })) {
+            if (record_toi) {
+                ++effective_pairs;
+                approaching_pairs +=
+                    std::any_of(constraint.points, constraint.points + constraint.count,
+                                [](const ContactConstraintPoint& point) {
+                                    return point.normal_impulse > real(0) &&
+                                           point.base_separation <= real(0) &&
+                                           point.initial_normal_velocity < real(0);
+                                });
+            }
+            for (const auto body : {pair.body_a, pair.body_b})
+                if (const auto island = state.body_pool.island_of(body))
+                    solve.processed_islands[solve.island_positions[island->index]]
+                        .received_toi_impulse = true;
+        }
         const bool local = state.interval.microstep &&
                            pairs.toi_local_contacts.size() == pairs.pairs->size() &&
                            pairs.toi_local_contacts[row].valid;
-        save_contact_impulses(solve, pair,
-                              local ? pairs.toi_local_contacts[row].manifold
-                                    : pairs.manifolds->at(row),
-                              *prepared.constraint, target,
-                              solve.constraint_step_seconds[i]);
+        save_contact_impulses(
+            solve, pair, local ? pairs.toi_local_contacts[row].manifold : pairs.manifolds->at(row),
+            *prepared.constraint, target, solve.constraint_step_seconds[i],
+            solve.constraint_cache_slots[i]);
         BodyConfigs::EventFlags flags_a, flags_b;
         if (!state.body_pool.get_event_flags(pair.body_a, flags_a) ||
             !state.body_pool.get_event_flags(pair.body_b, flags_b))
@@ -644,6 +684,27 @@ bool run_solve(WorldState& state) {
             bump_motion_version(state, solve.bodies[i]);
     if (!run_update_contact_edges(state))
         return stage_error(state, "run_solve: check failed (!run_update_contact_edges(state))");
+    if (state.interval.microstep) {
+        u64 charged_islands = 0;
+        for (const auto& processed : solve.processed_islands) {
+            if (!processed.received_toi_impulse)
+                continue;
+            if (!state.island_pool.increment_toi_truncations(processed.id))
+                return stage_error(state, "run_solve: failed to charge TOI impulse to island");
+            ++charged_islands;
+        }
+        if (record_toi) {
+            auto& stats = state.stats.toi_outcomes;
+            ++stats.microsteps;
+            stats.effective_microsteps += charged_islands != 0;
+            stats.islands += solve.processed_islands.size();
+            stats.charged_islands += charged_islands;
+            stats.selected_pairs += count;
+            stats.solved_pairs += solve.constraints.size();
+            stats.effective_pairs += effective_pairs;
+            stats.approaching_contact_pairs += approaching_pairs;
+        }
+    }
     prune_contact_cache(state);
     clear_consumed(state);
     return true;

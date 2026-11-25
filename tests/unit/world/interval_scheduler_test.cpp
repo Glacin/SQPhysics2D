@@ -577,6 +577,51 @@ TEST_CASE("World consumes a TOI microstep and preserves later ordinary work",
     CHECK(world.time_tu() == sqp::config::TU_PER_TICK * 2);
 }
 
+TEST_CASE("A cancelled TOI leaves the body its full tick of motion", "[world][step][toi]") {
+    using namespace sqp;
+    World world;
+    PhysicsSettings settings;
+    settings.gravity = {};
+    settings.interval.max_truncations_per_tick = 1;
+    const auto settings_id = world.set_settings(0, settings);
+    RigidBodyDef moving({0, 0}, 0, {1024, 0}, 0);
+    moving.configs.event_flags = BodyConfigs::EventFlags::PreSolve;
+    RigidBodyDef fixed;
+    fixed.position = {4, 0};
+    fixed.configs.register_type = BodyConfigs::RegisterType::ImmutableStatic;
+    const auto moving_id = world.create_rigid(0, moving);
+    const auto fixed_id = world.create_rigid(0, fixed);
+
+    int cancelled = 0;
+    const auto cancel = [](PhysicsEvent& event, void* data) {
+        auto& contact = std::get<PreSolveEvent>(event.event);
+        contact.manifold.count = 0;
+        ++*static_cast<int*>(data);
+    };
+    const auto callback_id = world.set_pre_solve_callback(0, cancel, &cancelled);
+    REQUIRE(world.step(0));
+    REQUIRE(take(world, settings_id).status == CommandStatus::Applied);
+    REQUIRE(take(world, callback_id).status == CommandStatus::Applied);
+    const auto body = take(world, moving_id).body;
+    const auto obstacle = take(world, fixed_id).body;
+    CircleShapeDef circle;
+    circle.radius = real(0.5);
+    const auto shape_a = world.create_circle_shape(0, circle, body);
+    const auto shape_b = world.create_circle_shape(0, circle, obstacle);
+    REQUIRE(world.step(config::TU_PER_TICK / 2));
+    REQUIRE(take(world, shape_a).status == CommandStatus::Applied);
+    REQUIRE(take(world, shape_b).status == CommandStatus::Applied);
+    REQUIRE(cancelled > 0);
+    const auto island = world.query().bodies().island_of(body);
+    REQUIRE(island);
+    CHECK(world.state().island_pool.toi_truncations(*island) == 0);
+
+    REQUIRE(world.step(config::TU_PER_TICK / 2));
+    CHECK(body_state(world, body).position.x == Catch::Approx(16));
+    CHECK(world.state().island_pool.get(*island)->time == config::TU_PER_TICK);
+    CHECK(world.state().island_pool.last_frozen_until(*island) == 0);
+}
+
 TEST_CASE("Static bodies keep proxies without owning an island", "[world][step]") {
     sqp::World world;
     sqp::PhysicsSettings settings;

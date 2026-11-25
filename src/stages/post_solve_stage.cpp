@@ -71,12 +71,17 @@ bool run_post_solve(WorldState& state) {
     if (!valid_manifold_layout(*pairs.manifolds, count) ||
         !valid_manifold_layout(pairs.original_manifolds, count) ||
         count > std::numeric_limits<std::size_t>::max() / 2)
-        return stage_error(state, "run_post_solve: check failed (!valid_manifold_layout(*pairs.manifolds, count) || !valid_manifold_layout(pairs.original_manifolds, count) || count > std::numeric_limits<std::size_t>::max() / 2)");
+        return stage_error(state,
+                           "run_post_solve: check failed (!valid_manifold_layout(*pairs.manifolds, "
+                           "count) || !valid_manifold_layout(pairs.original_manifolds, count) || "
+                           "count > std::numeric_limits<std::size_t>::max() / 2)");
 
     for (std::size_t row = 0; row < count; ++row) {
         if (!valid_manifold(*pairs.manifolds, row) ||
             !valid_manifold(pairs.original_manifolds, row))
-            return stage_error(state, "run_post_solve: check failed (!valid_manifold(*pairs.manifolds, row) || !valid_manifold(pairs.original_manifolds, row))");
+            return stage_error(state,
+                               "run_post_solve: check failed (!valid_manifold(*pairs.manifolds, "
+                               "row) || !valid_manifold(pairs.original_manifolds, row))");
 #ifdef SQP_DEBUG_VALIDATION
         const Pair& pair = (*pairs.pairs)[row];
         BodyConfigs::EventFlags flags_a, flags_b;
@@ -87,7 +92,9 @@ bool run_post_solve(WorldState& state) {
             !state.body_pool.get_shape_owner(pair.shape_a, owner_a) ||
             !state.body_pool.get_shape_owner(pair.shape_b, owner_b) || owner_a != pair.body_a ||
             owner_b != pair.body_b)
-            return stage_error(state, "run_post_solve: contact pair has invalid body, shape, event flags, or owner");
+            return stage_error(
+                state,
+                "run_post_solve: contact pair has invalid body, shape, event flags, or owner");
 #endif
     }
 #ifdef SQP_DEBUG_VALIDATION
@@ -97,10 +104,13 @@ bool run_post_solve(WorldState& state) {
     for (const auto& entry : reports) {
         const std::size_t row = entry.pair_index;
         if (row >= count || pairs.manifolds->counts[row] == 0)
-            return stage_error(state, "run_post_solve: check failed (row >= count || pairs.manifolds->counts[row] == 0)");
+            return stage_error(
+                state,
+                "run_post_solve: check failed (row >= count || pairs.manifolds->counts[row] == 0)");
 #ifdef SQP_DEBUG_VALIDATION
         if ((!first && row <= previous) || !valid_report(entry.contact))
-            return stage_error(state, "run_post_solve: check failed ((!first && row <= previous) || !valid_report(entry.contact))");
+            return stage_error(state, "run_post_solve: check failed ((!first && row <= previous) "
+                                      "|| !valid_report(entry.contact))");
         first = false;
         previous = row;
 #endif

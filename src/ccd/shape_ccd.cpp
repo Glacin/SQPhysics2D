@@ -629,21 +629,26 @@ bool sweep_shape_pair_toi(const detail::ShapeQueryView& shape_a, Vec2 position_a
         *out_root_iterations = result.root_iterations;
     if (out_failed)
         *out_failed = result.state == ConvexToiState::Failed;
+
+    const bool polygon_pair = std::holds_alternative<ConvexPoly>(shape_a.geometry()) &&
+                              std::holds_alternative<ConvexPoly>(shape_b.geometry());
+    const bool check_polygon_start = polygon_pair && target_penetration_m == real(0);
+    Vec2 start_normal_ab;
+    // GJK can report a small positive gap inside a shallow SAT overlap.
+    if ((check_polygon_start || result.state == ConvexToiState::InitialOverlap) &&
+        sweep.overlaps(real(0), &start_normal_ab)) {
+        out_toi = real(0);
+        out_normal = -start_normal_ab;
+        return true;
+    }
+
     if (result.state == ConvexToiState::Hit || result.state == ConvexToiState::InitialOverlap ||
         (result.state == ConvexToiState::Failed && result.fraction < real(1))) {
         out_toi = result.fraction;
         out_normal = result.normal;
-        if (result.state == ConvexToiState::InitialOverlap) {
-            Vec2 normal_ab;
-            if (sweep.overlaps(real(0), &normal_ab))
-                out_normal = -normal_ab;
-        }
-        if (result.state != ConvexToiState::InitialOverlap &&
-            std::holds_alternative<ConvexPoly>(shape_a.geometry()) &&
-            std::holds_alternative<ConvexPoly>(shape_b.geometry())) {
-            Vec2 manifold_normal;
-            const bool starts_overlapped = sweep.overlaps(real(0));
-            if (!starts_overlapped) {
+        if (result.state != ConvexToiState::InitialOverlap && polygon_pair) {
+            if (check_polygon_start || !sweep.overlaps(real(0))) {
+                Vec2 manifold_normal;
                 real lower = real(0), upper = out_toi;
                 bool bracketed = sweep.overlaps(upper, &manifold_normal);
                 if (!bracketed) {
@@ -780,30 +785,15 @@ bool sweep_shape_pair_reentry_toi(const detail::ShapeQueryView& shape_a, Vec2 po
         if (upper >= real(1) || sweep.overlaps(upper))
             return false;
     }
-    const real first_clear_time = upper;
-    ConvexToiOutput result = convex_time_of_impact(
-        shape_a, position_a0, rotation_a0, position_a1, rotation_a1, shape_b, position_b0,
-        rotation_b0, position_b1, rotation_b1, target_penetration_m, upper, real(1));
-    for (u32 retry = 0; retry < 64 && result.state == ConvexToiState::Failed &&
-                        result.fraction <= upper + config::EPSILON && upper < real(1);
-         ++retry) {
-        upper = std::min(real(1), upper + exit_advance * real(4));
-        if (sweep.overlaps(upper))
-            break;
-        result = convex_time_of_impact(shape_a, position_a0, rotation_a0, position_a1, rotation_a1,
-                                       shape_b, position_b0, rotation_b0, position_b1, rotation_b1,
-                                       target_penetration_m, upper, real(1));
-    }
     if (target_penetration_m <= config::EPSILON) {
         const real feature_span =
             std::max(real(0.05),
                      std::min(shape_a.inner_bound_radius, shape_b.inner_bound_radius) * real(0.25));
         const u32 samples =
             std::clamp<u32>(static_cast<u32>(std::ceil(motion_bound / feature_span)), 64, 2048);
-        real previous = first_clear_time;
+        real previous = upper;
         for (u32 sample = 1; sample <= samples; ++sample) {
-            const real candidate =
-                first_clear_time + (real(1) - first_clear_time) * real(sample) / real(samples);
+            const real candidate = upper + (real(1) - upper) * real(sample) / real(samples);
             Vec2 manifold_normal;
             if (sweep.overlaps(candidate, &manifold_normal)) {
                 real scan_lower = previous, hit = candidate;
@@ -822,6 +812,19 @@ bool sweep_shape_pair_reentry_toi(const detail::ShapeQueryView& shape_a, Vec2 po
             previous = candidate;
         }
         return false;
+    }
+    ConvexToiOutput result = convex_time_of_impact(
+        shape_a, position_a0, rotation_a0, position_a1, rotation_a1, shape_b, position_b0,
+        rotation_b0, position_b1, rotation_b1, target_penetration_m, upper, real(1));
+    for (u32 retry = 0; retry < 64 && result.state == ConvexToiState::Failed &&
+                        result.fraction <= upper + config::EPSILON && upper < real(1);
+         ++retry) {
+        upper = std::min(real(1), upper + exit_advance * real(4));
+        if (sweep.overlaps(upper))
+            break;
+        result = convex_time_of_impact(shape_a, position_a0, rotation_a0, position_a1, rotation_a1,
+                                       shape_b, position_b0, rotation_b0, position_b1, rotation_b1,
+                                       target_penetration_m, upper, real(1));
     }
     if (result.state == ConvexToiState::Hit ||
         (result.state == ConvexToiState::Failed && result.fraction < real(1))) {

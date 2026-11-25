@@ -22,16 +22,18 @@ struct Fixture {
         return {handle, shape};
     }
 
-    sqp::Pair pair(sqp::Vec2 a, sqp::Vec2 b, sqp::IslandId second_island = {}) {
-        const auto [body_a, shape_a] = body(a);
+    sqp::Pair pair(sqp::Vec2 a, sqp::Vec2 b, sqp::IslandId second_island = {},
+                   sqp::IslandId first_island = {}) {
+        const auto [body_a, shape_a] = body(a, first_island);
         const auto [body_b, shape_b] = body(b, second_island);
+        return current_pair({body_a, body_b, shape_a, shape_b});
+    }
+
+    sqp::Pair current_pair(sqp::Pair pair) const {
         const auto versions = state.body_pool.motion_version_column(sqp::BodyConfigs::Kind::Rigid);
-        return {body_a,
-                body_b,
-                shape_a,
-                shape_b,
-                versions[*state.body_pool.dense_index(body_a)],
-                versions[*state.body_pool.dense_index(body_b)]};
+        pair.motion_version_a = versions[*state.body_pool.dense_index(pair.body_a)];
+        pair.motion_version_b = versions[*state.body_pool.dense_index(pair.body_b)];
+        return pair;
     }
 
     void push(sqp::Pair pair, sqp::tick_t time) {
@@ -58,6 +60,31 @@ TEST_CASE("ProcessToi rejects mismatched columns before consuming records", "[wo
     CHECK_FALSE(sqp::run_process_toi(f.state, f.state.interval.target_end, selected));
     CHECK(f.state.narrow_phase.toi_pairs.size() == 1);
     CHECK(f.state.process_toi.toi_heap.empty());
+}
+
+TEST_CASE("TOI index preserves the first event and is rebuilt on copy", "[world][toi]") {
+    Fixture f;
+    const auto contact = f.pair({0, 0}, {1, 0});
+    f.state.interval.target_end = 20;
+    f.push(contact, 5);
+    f.push(contact, 5);
+    f.state.narrow_phase.toi_normals.back() = {0, 1};
+    bool selected = false;
+    REQUIRE(sqp::run_process_toi(f.state, 4, selected));
+    REQUIRE(f.state.process_toi.toi_heap.size() == 1);
+    CHECK(f.state.process_toi.toi_heap.front().normal == sqp::Vec2{-1, 0});
+    auto copy = sqp::WorldState(f.state);
+    f.push(contact, 6);
+    REQUIRE(sqp::run_process_toi(f.state, 4, selected));
+    REQUIRE(f.state.process_toi.toi_heap.size() == 2);
+
+    copy.narrow_phase.toi_pairs.push_back(contact);
+    copy.narrow_phase.toi_times.push_back(5);
+    copy.narrow_phase.toi_normals.push_back({0, 1});
+    REQUIRE(sqp::run_process_toi(copy, 4, selected));
+    REQUIRE(copy.process_toi.toi_heap.size() == 1);
+    CHECK(copy.process_toi.toi_heap.front().normal == sqp::Vec2{-1, 0});
+    CHECK(copy.process_toi.next_sequence == 1);
 }
 
 TEST_CASE("ProcessToi enqueues records but preserves pending microstep output", "[world][toi]") {
@@ -143,30 +170,60 @@ TEST_CASE("ProcessToi swaps ordinary results into delayed buffers by pointer", "
     CHECK(f.state.pairs.delayed_pairs->size() == 1);
 }
 
-TEST_CASE("TOI contacts charge each Island once per time batch", "[world][toi]") {
+TEST_CASE("A TOI batch only charges islands with solved impulses once", "[world][toi]") {
     Fixture f;
+    f.state.settings.gravity = {};
     f.state.settings.interval.max_truncations_per_tick = 1;
+    f.state.interval.target_end = sqp::config::TU_PER_TICK;
+    const auto other = f.state.island_pool.create();
+    const auto first = f.pair({0, 0}, {1, 0});
+    const auto second = f.pair({4, 0}, {5, 0});
+    const auto separating = f.pair({8, 0}, {9, 0}, other, other);
+    REQUIRE(f.state.body_pool.set_velocity(first.body_a, {10, 0}, 0));
+    REQUIRE(f.state.body_pool.set_velocity(second.body_a, {10, 0}, 0));
+    REQUIRE(f.state.body_pool.set_velocity(separating.body_b, {10, 0}, 0));
     f.state.interval.tick = true;
-    f.push(f.pair({0, 0}, {1, 0}), 3);
-    f.push(f.pair({4, 0}, {5, 0}), 3);
+    for (auto pair : {first, second, separating})
+        f.push(f.current_pair(pair), 3);
+
     bool selected = false;
     REQUIRE(sqp::run_process_toi(f.state, 3, selected));
     REQUIRE(selected);
     CHECK_FALSE(f.state.interval.tick);
-    CHECK(f.state.pairs.pairs->size() == 2);
+    CHECK(f.state.pairs.pairs->size() == 3);
+    CHECK(f.state.island_pool.toi_truncations(f.island) == 0);
+    REQUIRE(sqp::run_pre_solve(f.state));
+    REQUIRE(sqp::run_solve(f.state));
     CHECK(f.state.island_pool.toi_truncations(f.island) == 1);
+    CHECK(f.state.island_pool.toi_truncations(other) == 0);
     REQUIRE(sqp::run_advance_interval(f.state));
+    CHECK(f.state.island_pool.frozen_until(f.island) == sqp::config::TU_PER_TICK);
+    CHECK(f.state.island_pool.frozen_until(other) == 0);
+    CHECK(f.state.island_pool.get(other)->time == 3);
+}
 
-    f.push(f.pair({8, 0}, {9, 0}), 4);
-    f.push(f.pair({12, 0}, {13, 0}), 6);
-    REQUIRE(sqp::run_process_toi(f.state, 4, selected));
-    CHECK_FALSE(selected);
-    CHECK(f.state.process_toi.toi_heap.size() == 1);
-    CHECK(f.state.process_toi.toi_heap.front().time == 6);
-    f.state.settings.interval.max_truncations_per_tick = 2;
-    REQUIRE(sqp::run_process_toi(f.state, 6, selected));
-    CHECK(selected);
-    CHECK(f.state.island_pool.toi_truncations(f.island) == 2);
+TEST_CASE("Four zero impulse TOIs leave room for a later effective TOI", "[world][toi]") {
+    Fixture f;
+    f.state.settings.gravity = {};
+    f.state.interval.target_end = sqp::config::TU_PER_TICK;
+    const auto contact = f.pair({0, 0}, {1, 0});
+    REQUIRE(f.state.body_pool.set_velocity(contact.body_b, {10, 0}, 0));
+
+    for (sqp::tick_t event = 1; event <= 5; ++event) {
+        if (event == 5)
+            REQUIRE(f.state.body_pool.set_velocity(contact.body_a, {20, 0}, 0));
+        const auto impact = event * (sqp::config::TU_PER_TICK / 8);
+        f.push(f.current_pair(contact), impact);
+        bool selected = false;
+        REQUIRE(sqp::run_process_toi(f.state, impact, selected));
+        REQUIRE(selected);
+        REQUIRE(sqp::run_pre_solve(f.state));
+        REQUIRE(sqp::run_solve(f.state));
+        CHECK(f.state.island_pool.toi_truncations(f.island) == (event == 5 ? 1 : 0));
+        REQUIRE(sqp::run_advance_interval(f.state));
+        CHECK(f.state.island_pool.frozen_until(f.island) == 0);
+        CHECK(f.state.island_pool.get(f.island)->time == impact);
+    }
 }
 
 TEST_CASE("A solved TOI at the limit freezes its island until the next tick", "[world][toi]") {
@@ -174,8 +231,9 @@ TEST_CASE("A solved TOI at the limit freezes its island until the next tick", "[
     f.state.settings.gravity = {};
     f.state.settings.interval.max_truncations_per_tick = 1;
     const auto contact = f.pair({0, 0}, {1, 0});
+    REQUIRE(f.state.body_pool.set_velocity(contact.body_a, {10, 0}, 0));
     const sqp::tick_t impact = sqp::config::TU_PER_TICK / 4;
-    f.push(contact, impact);
+    f.push(f.current_pair(contact), impact);
     f.state.interval.target_end = sqp::config::TU_PER_TICK;
     bool selected = false;
     REQUIRE(sqp::run_process_toi(f.state, impact, selected));
@@ -236,6 +294,77 @@ TEST_CASE("Frozen contact propagation follows only scanned TOI pairs", "[world][
     CHECK(f.state.island_pool.frozen_until(c_island) == sqp::config::TU_PER_TICK);
 }
 
+TEST_CASE("A freeze retry preserves valid TOIs already taken at the same time", "[world][toi]") {
+    Fixture f;
+    const auto other = f.state.island_pool.create();
+    const auto unrelated = f.state.island_pool.create();
+    const auto first = f.pair({10, 0}, {11, 0}, unrelated, unrelated);
+    const auto propagating = f.pair({0, 0}, {1, 0}, other);
+    const auto last = f.pair({14, 0}, {15, 0}, unrelated, unrelated);
+    f.state.schedule.time = 3;
+    f.state.schedule.prepared = true;
+    f.state.interval.target_end = 8;
+    *f.state.interval.islands = {f.island, other, unrelated};
+    REQUIRE(sqp::freeze_island_until_next_tick(f.state, f.island, 3));
+    f.push(first, 5);
+    f.push(f.current_pair(propagating), 5);
+    f.push(last, 5);
+
+    bool selected = false;
+    REQUIRE(sqp::run_process_toi(f.state, 5, selected));
+    CHECK_FALSE(selected);
+    CHECK(f.state.broad_phase.freeze_retry);
+    CHECK(f.state.broad_phase.toi_changed_islands == std::vector<sqp::IslandId>{other});
+    CHECK(*f.state.interval.islands == std::vector<sqp::IslandId>{f.island, unrelated});
+    CHECK(f.state.pairs.pairs->empty());
+    REQUIRE(f.state.process_toi.toi_heap.size() == 2);
+    CHECK(f.state.process_toi.toi_heap.front().sequence == 0);
+
+    REQUIRE(sqp::run_process_toi(f.state, 5, selected));
+    REQUIRE(selected);
+    CHECK(*f.state.pairs.pairs == std::vector<sqp::Pair>{first, last});
+    CHECK(f.state.process_toi.next_sequence == 3);
+}
+
+TEST_CASE("A TOI without a manifold cannot propagate a freeze", "[world][toi]") {
+    Fixture f;
+    const auto other = f.state.island_pool.create();
+    const auto contact = f.pair({0, 0}, {10, 0}, other);
+    f.state.schedule.time = 3;
+    f.state.schedule.prepared = true;
+    f.state.interval.target_end = 6;
+    REQUIRE(sqp::freeze_island_until_next_tick(f.state, f.island, 3));
+    f.push(f.current_pair(contact), 5);
+    bool selected = true;
+    REQUIRE(sqp::run_process_toi(f.state, 5, selected));
+    CHECK_FALSE(selected);
+    CHECK(f.state.process_toi.toi_heap.empty());
+    CHECK(f.state.island_pool.frozen_until(other) == 0);
+    CHECK(f.state.island_pool.get(other)->time == 0);
+    CHECK(f.state.schedule.prepared);
+}
+
+TEST_CASE("Zero-depth polygon support uses the offset vertices", "[world][toi]") {
+    Fixture f;
+    const auto other = f.state.island_pool.create();
+    const auto [circle, shape_circle] = f.body({sqp::real(5.00005), 0}, other);
+    sqp::PolygonShapeDef definition;
+    definition.vertices = {{2, -1}, {4, -1}, {4, 1}, {2, 1}};
+    const auto polygon = f.state.body_pool.add_rigid({});
+    const auto shape_polygon = f.state.shape_pool.add_polygon(definition);
+    REQUIRE(f.state.body_pool.attach_shape(polygon, shape_polygon, f.state.shape_pool));
+    REQUIRE(f.state.island_pool.add_body(f.island, polygon, f.state.body_pool));
+    f.state.interval.target_end = 6;
+    f.push(f.current_pair({polygon, circle, shape_polygon, shape_circle}), 5);
+    bool selected = false;
+    REQUIRE(sqp::run_process_toi(f.state, 5, selected));
+    REQUIRE(selected);
+    const auto manifold = f.state.pairs.manifolds->at(0);
+    REQUIRE(manifold.count == 1);
+    CHECK(manifold.points[0].depth == 0);
+    CHECK(manifold.points[0].point.x == Catch::Approx(4).margin(0.0001));
+}
+
 TEST_CASE("An ordinary narrow phase contact propagates a freeze", "[world][toi]") {
     Fixture f;
     const auto other = f.state.island_pool.create();
@@ -271,9 +400,12 @@ TEST_CASE("A static contact endpoint does not acquire an island freeze", "[world
     f.push({moving, fixed, moving_shape, fixed_shape,
             versions[*f.state.body_pool.dense_index(moving)],
             versions[*f.state.body_pool.dense_index(fixed)]}, 5);
+    f.state.schedule.prepared = true;
     bool selected = true;
     REQUIRE(sqp::run_process_toi(f.state, 5, selected));
     CHECK_FALSE(selected);
+    CHECK_FALSE(f.state.broad_phase.freeze_retry);
+    CHECK(f.state.schedule.prepared);
     CHECK_FALSE(f.state.body_pool.island_of(fixed).has_value());
     CHECK(f.state.island_pool.frozen_until(f.island) == sqp::config::TU_PER_TICK);
 }
@@ -336,7 +468,7 @@ TEST_CASE("Exhausted Island does not block other TOI contacts", "[world][toi]") 
     REQUIRE(f.state.pairs.pairs->size() == 1);
     CHECK(f.state.pairs.pairs->at(0) == allowed);
     CHECK(f.state.island_pool.toi_truncations(f.island) == 1);
-    CHECK(f.state.island_pool.toi_truncations(other) == 1);
+    CHECK(f.state.island_pool.toi_truncations(other) == 0);
 }
 
 TEST_CASE("TOI without a manifold does not consume Island budget", "[world][toi]") {

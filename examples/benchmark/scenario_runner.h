@@ -20,7 +20,10 @@ struct Options {
     u32 awake_bodies = 0;
     bool detail = false;
     bool check_determinism = false;
+    bool freeze_stats = false;
+    bool toi_stats = false;
     std::optional<real> proxy_extension_ratio;
+    std::optional<u32> toi_budget;
 };
 
 struct Context {

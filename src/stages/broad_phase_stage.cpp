@@ -120,7 +120,8 @@ bool run_broad_phase(WorldState& state) {
         // Direct stage fixtures populate proxy columns without the command-side index.
         for (IslandId id : active_islands) {
             const Island* island = state.island_pool.get(id);
-            if (!island || island->time > interval.target_end)
+            if (!island || (island->time > interval.target_end &&
+                            state.island_pool.frozen_until(id) <= state.schedule.time))
                 return stage_error(state, "run_broad_phase: check failed (!island || island->time > interval.target_end)");
         }
         broad.filter_configurations.resize(broad.bodies.size());
@@ -174,7 +175,8 @@ bool run_broad_phase(WorldState& state) {
         }
     } else for (IslandId id : active_islands) {
         const Island* island = state.island_pool.get(id);
-        if (!island || island->time > interval.target_end)
+        if (!island || (island->time > interval.target_end &&
+                        state.island_pool.frozen_until(id) <= state.schedule.time))
             return stage_error(state, "run_broad_phase: check failed (!island || island->time > interval.target_end)");
         const auto visit = [&](BodyHandle body) {
             if (broad.bodies.empty()) return true;
@@ -245,6 +247,7 @@ bool run_broad_phase(WorldState& state) {
                 std::chrono::steady_clock::now() - begin).count());
         state.stats.pending_nodes_visited += query_stats.nodes_visited;
         ++state.stats.pending_query_calls;
+        state.stats.freeze_retry_queries += broad.freeze_retry;
 #else
         const bool queried = broad.tree.query_proxy_pairs(
             broad.proxy_handles[index], broad.candidates, &broad.traversal_stack,

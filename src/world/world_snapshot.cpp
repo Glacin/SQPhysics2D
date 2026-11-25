@@ -72,6 +72,13 @@ WorldState::WorldState(const WorldState& source)
     interval.microstep_time = source.interval.microstep_time;
     interval.target_end = source.interval.target_end;
 
+    process_toi.toi_keys.clear();
+    for (const auto& event : process_toi.toi_heap)
+        process_toi.toi_keys.insert({event.time, event.pair});
+    solve.contact_cache_index.clear();
+    for (std::size_t i = 0; i < solve.contact_cache.size(); ++i)
+        solve.contact_cache_index.emplace(detail::contact_pair_key(solve.contact_cache[i]), i);
+
     for (auto& entry : narrow_phase.candidate_cache)
         if (entry.view.pool)
             entry.view.pool = &shape_pool;
