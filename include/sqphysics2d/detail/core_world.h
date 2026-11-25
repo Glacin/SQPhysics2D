@@ -20,6 +20,8 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace sqp {
@@ -160,6 +162,11 @@ struct WorldState {
         u64 freeze_retries = 0;
         u64 freeze_retry_queries = 0;
         u64 freeze_retry_sweeps = 0;
+        u64 narrow_sweeps = 0;
+        u64 narrow_reused_results = 0;
+        u64 toi_dedup_checks = 0;
+        u64 toi_duplicates = 0;
+        u64 constraint_prepare_nanoseconds = 0;
         std::vector<IntervalEntry> interval_entries;
 #endif
     } stats;
@@ -286,6 +293,24 @@ struct WorldState {
         std::vector<CandidateCacheEntry> candidate_cache;
         u32 candidate_cache_epoch = 0;
 
+        struct SweepHit {
+            tick_t time;
+            Vec2 normal;
+            ToiLocalImpact impact;
+        };
+        struct PairResult {
+            BroadPhase::Pair candidate;
+            Pair pair;
+            tick_t start_time = 0;
+            u8 modes = 0;
+            u8 frozen = 0;
+            // Absolute endpoints, followed by start poses and velocities for a sweep.
+            std::array<real, 18> motion{};
+            std::variant<std::monostate, ContactManifold, SweepHit> result;
+        };
+        std::vector<PairResult> pair_results, next_pair_results;
+        tick_t pair_result_end = 0;
+
         // Ordinary contact rows are reusable only within the same prepared time span.
         std::optional<tick_t> prepared_time;
         tick_t prepared_end = 0;
@@ -319,8 +344,22 @@ struct WorldState {
             }
         };
 
+        struct EventKey {
+            tick_t time;
+            Pair pair;
+            bool operator==(const EventKey&) const = default;
+        };
+        struct EventKeyHash {
+            std::size_t operator()(const EventKey& key) const noexcept {
+                using Hash = detail::ContactPairHash;
+                const u64 shapes = Hash::mix(key.pair.shape_a.index, key.pair.shape_b.index);
+                return static_cast<std::size_t>(Hash::mix(shapes, key.time));
+            }
+        };
+
         // Future events survive interval changes and are revalidated before use.
         std::vector<ToiEvent> toi_heap;
+        std::unordered_set<EventKey, EventKeyHash> toi_keys;
         u64 next_sequence = 0;
         std::vector<ToiEvent> selected_events;
 
@@ -341,6 +380,13 @@ struct WorldState {
         std::vector<ToiLocalContact> delayed_toi_local_contacts;
         ContactManifolds delayed_original_manifolds;
         bool delayed_original_manifolds_valid = false;
+
+        struct PreSolveScratch {
+            ContactManifolds manifolds;
+            std::vector<ToiLocalContact> local_contacts;
+            std::vector<real> restitution, dynamic_friction, static_friction;
+            std::vector<real> damping, frequency, correction_speed;
+        } pre_solve_scratch;
 
         // PreSolve material output; every column has the same row index as pairs.
         std::vector<real> combined_damping_ratios;
@@ -401,6 +447,8 @@ struct WorldState {
         };
         // Persists independently of the interval's active and delayed pair columns.
         std::vector<ContactCacheEntry> contact_cache;
+        std::unordered_map<detail::ContactPairKey, std::size_t, detail::ContactPairHash> contact_cache_index;
+        std::vector<std::size_t> constraint_cache_slots;
         struct ProcessedIsland {
             IslandId id;
             tick_t start = 0;

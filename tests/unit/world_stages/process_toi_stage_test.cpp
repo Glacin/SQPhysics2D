@@ -62,6 +62,31 @@ TEST_CASE("ProcessToi rejects mismatched columns before consuming records", "[wo
     CHECK(f.state.process_toi.toi_heap.empty());
 }
 
+TEST_CASE("TOI index preserves the first event and is rebuilt on copy", "[world][toi]") {
+    Fixture f;
+    const auto contact = f.pair({0, 0}, {1, 0});
+    f.state.interval.target_end = 20;
+    f.push(contact, 5);
+    f.push(contact, 5);
+    f.state.narrow_phase.toi_normals.back() = {0, 1};
+    bool selected = false;
+    REQUIRE(sqp::run_process_toi(f.state, 4, selected));
+    REQUIRE(f.state.process_toi.toi_heap.size() == 1);
+    CHECK(f.state.process_toi.toi_heap.front().normal == sqp::Vec2{-1, 0});
+    auto copy = sqp::WorldState(f.state);
+    f.push(contact, 6);
+    REQUIRE(sqp::run_process_toi(f.state, 4, selected));
+    REQUIRE(f.state.process_toi.toi_heap.size() == 2);
+
+    copy.narrow_phase.toi_pairs.push_back(contact);
+    copy.narrow_phase.toi_times.push_back(5);
+    copy.narrow_phase.toi_normals.push_back({0, 1});
+    REQUIRE(sqp::run_process_toi(copy, 4, selected));
+    REQUIRE(copy.process_toi.toi_heap.size() == 1);
+    CHECK(copy.process_toi.toi_heap.front().normal == sqp::Vec2{-1, 0});
+    CHECK(copy.process_toi.next_sequence == 1);
+}
+
 TEST_CASE("ProcessToi enqueues records but preserves pending microstep output", "[world][toi]") {
     Fixture f;
     const auto first = f.pair({0, 0}, {1, 0});

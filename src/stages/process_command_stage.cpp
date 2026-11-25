@@ -29,6 +29,7 @@ bool rebuild_proxies(WorldState& state) {
     broad.reprepare_after_toi = false;
     broad.freeze_retry = false;
     state.narrow_phase.prepared_time.reset();
+    state.narrow_phase.pair_results.clear();
     state.narrow_phase.ordinary_contact_keys.clear();
     broad.selected.clear();
     broad.candidates.clear();
@@ -108,6 +109,7 @@ bool update_proxies(WorldState& state, const std::vector<BodyHandle>& changed) {
     broad.reprepare_after_toi = false;
     broad.freeze_retry = false;
     state.narrow_phase.prepared_time.reset();
+    state.narrow_phase.pair_results.clear();
     state.narrow_phase.ordinary_contact_keys.clear();
     broad.candidates.clear();
     broad.ordinary_candidates.clear();

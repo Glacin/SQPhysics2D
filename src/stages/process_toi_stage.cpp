@@ -303,10 +303,11 @@ bool run_process_toi(WorldState& state, tick_t bound, bool& selected_time) {
         interval.islands.swap(interval.delayed_islands);
     };
     for (std::size_t i = 0; i < input.toi_pairs.size(); ++i) {
-        const bool duplicate =
-            std::any_of(output.toi_heap.begin(), output.toi_heap.end(), [&](const ToiEvent& event) {
-                return event.time == input.toi_times[i] && event.pair == input.toi_pairs[i];
-            });
+        const bool duplicate = !output.toi_keys.insert({input.toi_times[i], input.toi_pairs[i]}).second;
+#ifdef SQP_ENABLE_PERFORMANCE_PROFILING
+        ++state.stats.toi_dedup_checks;
+        state.stats.toi_duplicates += duplicate;
+#endif
         if (!duplicate) {
             output.toi_heap.push_back(
                 {input.toi_times[i], input.toi_pairs[i], input.toi_normals[i],
@@ -359,6 +360,7 @@ bool run_process_toi(WorldState& state, tick_t bound, bool& selected_time) {
             std::pop_heap(output.toi_heap.begin(), output.toi_heap.end(), compare);
             ToiEvent event = output.toi_heap.back();
             output.toi_heap.pop_back();
+            output.toi_keys.erase({event.time, event.pair});
             if (event.time < state.schedule.time || !event_is_current(state, event))
                 continue;
             if (!event_is_after_islands(state, event))
@@ -375,6 +377,7 @@ bool run_process_toi(WorldState& state, tick_t bound, bool& selected_time) {
                 // The retry recasts changed bodies. Untouched events retain their heap order.
                 for (const auto& prior : staged) {
                     if (event_is_current(state, prior)) {
+                        output.toi_keys.insert({prior.time, prior.pair});
                         output.toi_heap.push_back(prior);
                         std::push_heap(output.toi_heap.begin(), output.toi_heap.end(), compare);
                     }

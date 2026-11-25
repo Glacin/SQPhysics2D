@@ -142,10 +142,13 @@ bool run_pre_solve(WorldState& state) {
     const std::size_t count = data.pairs->size();
     if (data.original_manifolds_valid && data.original_manifolds.size() != count)
         return stage_error(state, "run_pre_solve: check failed (data.original_manifolds_valid && data.original_manifolds.size() != count)");
-    ContactManifolds manifolds = *data.manifolds;
-    auto local_contacts = data.toi_local_contacts;
-    std::vector<real> restitution(count), dynamic_friction(count), static_friction(count);
-    std::vector<real> damping(count), frequency(count), correction_speed(count);
+    auto& [manifolds, local_contacts, restitution, dynamic_friction, static_friction,
+           damping, frequency, correction_speed] = data.pre_solve_scratch;
+    manifolds = *data.manifolds;
+    local_contacts = data.toi_local_contacts;
+    for (auto* values : {&restitution, &dynamic_friction, &static_friction, &damping,
+                         &frequency, &correction_speed})
+        values->resize(count);
 
     for (std::size_t i = 0; i < count; ++i) {
         const Pair pair = (*data.pairs)[i];
@@ -249,7 +252,7 @@ bool run_pre_solve(WorldState& state) {
         data.original_manifolds = *data.manifolds;
         data.original_manifolds_valid = true;
     }
-    *data.manifolds = std::move(manifolds);
+    std::swap(*data.manifolds, manifolds);
     data.toi_local_contacts.swap(local_contacts);
     data.combined_restitutions.swap(restitution);
     data.combined_dynamic_frictions.swap(dynamic_friction);

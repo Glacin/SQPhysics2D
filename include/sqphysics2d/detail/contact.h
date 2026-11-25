@@ -20,6 +20,36 @@ struct Pair {
     bool operator==(const Pair&) const = default;
 };
 
+namespace detail {
+
+struct ContactPairKey {
+    BodyHandle body_a, body_b;
+    ShapeHandle shape_a, shape_b;
+    bool operator==(const ContactPairKey&) const = default;
+};
+
+struct ContactPairHash {
+    static constexpr u64 mix(u64 seed, u64 value) noexcept {
+        return seed ^ (value + 0x9e3779b97f4a7c15ull + (seed << 6) + (seed >> 2));
+    }
+
+    std::size_t operator()(const ContactPairKey& key) const noexcept {
+        u64 seed = 0;
+        for (const auto shape : {key.shape_a, key.shape_b}) {
+            seed = mix(seed, (u64(shape.generation) << 32) | shape.index);
+            seed = mix(seed, static_cast<u8>(shape.kind));
+        }
+        return static_cast<std::size_t>(seed);
+    }
+};
+
+template<class Contact>
+ContactPairKey contact_pair_key(const Contact& pair) {
+    return {pair.body_a, pair.body_b, pair.shape_a, pair.shape_b};
+}
+
+} // namespace detail
+
 // Which kind of geometric feature produced a contact point.
 enum class ContactFeatureType : u8 {
     Edge = 0,

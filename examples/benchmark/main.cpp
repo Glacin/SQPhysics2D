@@ -176,6 +176,14 @@ void print_detail(const sqp::benchmark::Result& result) {
                 static_cast<unsigned long long>(stats.freeze_retry_queries),
                 static_cast<unsigned long long>(stats.freeze_retry_sweeps));
 
+    std::printf("narrow_sweeps=%llu narrow_reused_results=%llu toi_dedup_checks=%llu "
+                "toi_duplicates=%llu constraint_prepare_ms=%.6f\n",
+                static_cast<unsigned long long>(stats.narrow_sweeps),
+                static_cast<unsigned long long>(stats.narrow_reused_results),
+                static_cast<unsigned long long>(stats.toi_dedup_checks),
+                static_cast<unsigned long long>(stats.toi_duplicates),
+                static_cast<double>(stats.constraint_prepare_nanoseconds) / 1'000'000.0);
+
     const auto& average = result.tick_averages;
     std::printf("\n%-16s %16s %16s %16s %16s %16s\n", "tick_average", "intervals",
                 "active_islands", "active_bodies", "candidates", "pairs");

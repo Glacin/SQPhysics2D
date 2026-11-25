@@ -1106,6 +1106,58 @@ TEST_CASE("Ordinary boundary defers a penetrating LiteCircle wall contact once",
     }
 }
 
+TEST_CASE("Narrow phase reuses identical sweeps and recasts a shortened interval",
+          "[world][narrow_phase][toi]") {
+    using namespace sqp;
+    WorldState state;
+    state.broad_phase.proxy_index_ready = true;
+    const auto island = state.island_pool.create();
+    state.interval.target_end = config::TU_PER_TICK;
+    const auto moving = add_body(state, island, {-4, 0}, {512, 0},
+                                 BodyConfigs::CcdOverride::Shapecast, true, 0, 0, true);
+    RigidBodyDef wall;
+    wall.configs.register_type = BodyConfigs::RegisterType::ImmutableStatic;
+    const auto fixed = add_test_polygon(state, {}, wall, {{-1, -2}, {1, -2}, {1, 2}, {-1, 2}});
+    pair(state, moving, fixed);
+    REQUIRE(run_narrow_phase(state));
+    REQUIRE(state.narrow_phase.toi_times.size() == 1);
+    const auto first_time = state.narrow_phase.toi_times.front();
+
+    clear_outputs(state);
+    state.broad_phase.reprepare_after_toi = true;
+    pair(state, moving, fixed);
+    REQUIRE(run_narrow_phase(state));
+    CHECK(state.narrow_phase.toi_times == std::vector<tick_t>{first_time});
+#ifdef SQP_ENABLE_PERFORMANCE_PROFILING
+    CHECK(state.stats.narrow_reused_results == 1);
+    CHECK(state.stats.narrow_sweeps == 1);
+#endif
+
+    clear_outputs(state);
+    state.schedule.time = first_time / 2;
+    pair(state, moving, fixed);
+    REQUIRE(run_narrow_phase(state));
+    REQUIRE(state.narrow_phase.toi_times.size() == 1);
+#ifdef SQP_ENABLE_PERFORMANCE_PROFILING
+    CHECK(state.stats.narrow_reused_results == 1);
+    CHECK(state.stats.narrow_sweeps == 2);
+#endif
+
+    clear_outputs(state);
+    const auto body = state.broad_phase.bodies[moving];
+    REQUIRE(state.body_pool.set_velocity(body, {-512, 0}, 0));
+    pair(state, moving, fixed);
+    REQUIRE(run_narrow_phase(state));
+    CHECK(state.narrow_phase.toi_times.empty());
+    pair(state, moving, fixed);
+    REQUIRE(run_narrow_phase(state));
+    CHECK(state.narrow_phase.toi_times.empty());
+#ifdef SQP_ENABLE_PERFORMANCE_PROFILING
+    CHECK(state.stats.narrow_reused_results == 2);
+    CHECK(state.stats.narrow_sweeps == 3);
+#endif
+}
+
 TEST_CASE("A deferred wall TOI survives snapshots and yields to a same-time command",
           "[world][step][toi]") {
     using namespace sqp;

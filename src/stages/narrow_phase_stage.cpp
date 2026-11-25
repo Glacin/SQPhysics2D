@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <variant>
 
@@ -317,6 +318,17 @@ bool run_narrow_phase(WorldState& state) {
     auto& pairs = state.pairs;
     auto& broad = state.broad_phase;
     const bool freeze_retry = broad.freeze_retry;
+    auto& previous_results = output.pair_results;
+    auto& next_results = output.next_pair_results;
+    if (!broad.reprepare_after_toi || output.pair_result_end != state.interval.target_end)
+        previous_results.clear();
+    next_results.clear();
+    const auto rigid_configs = state.body_pool.configs_column(BodyConfigs::Kind::Rigid);
+    const bool cache_results = broad.proxy_index_ready && !freeze_retry &&
+        std::any_of(rigid_configs.begin(), rigid_configs.end(), [](const BodyConfigs& config) {
+            return config.register_type != BodyConfigs::RegisterType::ImmutableStatic;
+        });
+    std::size_t previous_result = 0;
     const bool reuse = freeze_retry && output.prepared_time == state.schedule.time &&
                        output.prepared_end == state.interval.target_end &&
                        output.ordinary_contact_keys.size() == pairs.pairs->size();
@@ -364,6 +376,12 @@ bool run_narrow_phase(WorldState& state) {
     };
     const auto was_updated = [&](u32 index) {
         return index < broad.selected.size() && broad.selected[index] == broad.selection_epoch;
+    };
+    const auto append_toi = [&](const Pair& pair, const WorldState::NarrowPhaseData::SweepHit& hit) {
+        output.toi_pairs.push_back(pair);
+        output.toi_times.push_back(hit.time);
+        output.toi_normals.push_back(hit.normal);
+        output.toi_impacts.push_back(hit.impact);
     };
     const std::size_t first_toi = output.toi_times.size();
     std::size_t previous_row = 0;
@@ -418,16 +436,72 @@ bool run_narrow_phase(WorldState& state) {
 
         const Pair pair{
             body_a, body_b, a.shape, b.shape, cached_a.motion_version, cached_b.motion_version};
-        if (mode_a == CastChoice::None && mode_b == CastChoice::None) {
+        const bool use_cast = mode_a == CastChoice::Cast || mode_b == CastChoice::Cast;
+        WorldState::NarrowPhaseData::PairResult* row = nullptr;
+        constexpr auto immutable = BodyConfigs::RegisterType::ImmutableStatic;
+        // Analytic LiteCircle and AABB casts are cheaper than recording their inputs.
+        if (cache_results && (!use_cast ||
+            (body_a.kind() == BodyConfigs::Kind::Rigid && a.shape.kind == ShapeKind::Polygon &&
+             a.configuration.configs.register_type != immutable) ||
+            (body_b.kind() == BodyConfigs::Kind::Rigid && b.shape.kind == ShapeKind::Polygon &&
+             b.configuration.configs.register_type != immutable))) {
+            auto& entry = next_results.emplace_back();
+            entry.candidate = candidate;
+            entry.pair = pair;
+            entry.modes = u8(mode_a == CastChoice::Cast) | (u8(mode_b == CastChoice::Cast) << 1);
+            entry.frozen = u8(frozen_a) | (u8(frozen_b) << 1);
+            if (use_cast)
+                entry.start_time = start_time;
+            if (use_cast) {
+                entry.motion = {a.end.position.x, a.end.position.y, a.end.rotation,
+                                b.end.position.x, b.end.position.y, b.end.rotation,
+                                a.start.position.x, a.start.position.y, a.start.rotation,
+                                b.start.position.x, b.start.position.y, b.start.rotation,
+                                a.linear_velocity.x, a.linear_velocity.y, a.angular_velocity,
+                                b.linear_velocity.x, b.linear_velocity.y, b.angular_velocity};
+            } else {
+                entry.motion = {a.end.position.x, a.end.position.y, a.end.rotation,
+                                b.end.position.x, b.end.position.y, b.end.rotation};
+            }
+
+            while (previous_result < previous_results.size() &&
+                   previous_results[previous_result].candidate < candidate)
+                ++previous_result;
+            if (previous_result < previous_results.size()) {
+                const auto& prior = previous_results[previous_result];
+                if (prior.candidate == candidate && prior.pair == pair &&
+                    prior.start_time == entry.start_time && prior.modes == entry.modes &&
+                    prior.frozen == entry.frozen &&
+                    std::memcmp(prior.motion.data(), entry.motion.data(),
+                                sizeof(entry.motion)) == 0) {
+                    entry.result = prior.result;
+#ifdef SQP_ENABLE_PERFORMANCE_PROFILING
+                    ++state.stats.narrow_reused_results;
+#endif
+                    if (const auto* hit = std::get_if<WorldState::NarrowPhaseData::SweepHit>(&entry.result))
+                        append_toi(pair, *hit);
+                    if (const auto* manifold = std::get_if<ContactManifold>(&entry.result);
+                        manifold && !append_ordinary(candidate, pair, *manifold))
+                        return stage_error(state, "run_narrow_phase: failed to reuse ordinary contact");
+                    continue;
+                }
+            }
+            row = &entry;
+        }
+        if (!use_cast) {
             ContactManifold manifold;
-            if (overlaps(a, b, a.end, b.end, &manifold) &&
-                !append_ordinary(candidate, pair, manifold))
-                return stage_error(state, "run_narrow_phase: failed to append ordinary contact");
+            if (overlaps(a, b, a.end, b.end, &manifold)) {
+                if (row)
+                    row->result = manifold;
+                if (!append_ordinary(candidate, pair, manifold))
+                    return stage_error(state, "run_narrow_phase: failed to append ordinary contact");
+            }
             continue;
         }
 
 #ifdef SQP_ENABLE_PERFORMANCE_PROFILING
         state.stats.freeze_retry_sweeps += freeze_retry;
+        ++state.stats.narrow_sweeps;
 #endif
         real fraction;
         Vec2 normal;
@@ -534,6 +608,7 @@ bool run_narrow_phase(WorldState& state) {
             if (kinematics.normal_speed > real(0)) {
 #ifdef SQP_ENABLE_PERFORMANCE_PROFILING
                 state.stats.freeze_retry_sweeps += freeze_retry;
+                ++state.stats.narrow_sweeps;
 #endif
                 const bool reentry = sweep_shape_pair_reentry_toi(
                     a.view, local_start_a.position, local_start_a.rotation, local_end_a.position,
@@ -566,11 +641,12 @@ bool run_narrow_phase(WorldState& state) {
         const auto impact_a = impact_pose(local_start_a, local_end_a);
         const auto impact_b = impact_pose(local_start_b, local_end_b);
 
-        output.toi_pairs.push_back(pair);
-        output.toi_times.push_back(toi_time);
-        output.toi_normals.push_back(normal);
-        output.toi_impacts.push_back({origin, impact_a.position, impact_b.position,
-                                      impact_a.rotation, impact_b.rotation, true});
+        const WorldState::NarrowPhaseData::SweepHit sweep{
+            toi_time, normal, {origin, impact_a.position, impact_b.position,
+                              impact_a.rotation, impact_b.rotation, true}};
+        if (row)
+            row->result = sweep;
+        append_toi(pair, sweep);
     }
 
     if (reuse) {
@@ -578,6 +654,9 @@ bool run_narrow_phase(WorldState& state) {
         pairs.delayed_manifolds->clear();
         output.previous_contact_keys.clear();
     }
+    previous_results.swap(next_results);
+    next_results.clear();
+    output.pair_result_end = state.interval.target_end;
     defer_wall_contacts(state, first_toi);
     output.prepared_time = state.schedule.time;
     output.prepared_end = state.interval.target_end;
