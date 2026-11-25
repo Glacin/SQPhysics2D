@@ -163,6 +163,10 @@ struct WorldState {
         u64 freeze_retry_queries = 0;
         u64 freeze_retry_sweeps = 0;
         u64 narrow_sweeps = 0;
+        u64 narrow_dimension_requests = 0;
+        u64 narrow_dimension_loads = 0;
+        u64 narrow_start_predictions = 0;
+        u64 narrow_reused_start_predictions = 0;
         u64 narrow_reused_results = 0;
         u64 toi_dedup_checks = 0;
         u64 toi_duplicates = 0;
@@ -281,7 +285,13 @@ struct WorldState {
             BodyHandle body;
             ShapeHandle shape;
             detail::ShapeQueryView view;
-            Pose source, end;
+            Pose source, end, predicted_start;
+            tick_t predicted_start_time = 0;
+            bool frozen = false;
+            real sweep_radius = 0;
+            bool dimensions_loaded = false;
+            real radius = 0;
+            Vec2 half_extents;
             Vec2 linear_velocity;
             real angular_velocity = 0;
             BodyConfiguration configuration;

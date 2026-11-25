@@ -31,16 +31,10 @@ struct CandidateBody {
     const BodyConfiguration& configuration;
     const detail::ShapeQueryView& view;
 
-    CandidateBody(const CandidateCacheEntry& cached, tick_t start_time)
-        : shape(cached.shape), end(cached.end), linear_velocity(cached.linear_velocity),
-          angular_velocity(cached.angular_velocity), configuration(cached.configuration),
-          view(cached.view) {
-        start = cached.source;
-        if (start_time != cached.island_time)
-            predict_body_state(cached.source.position, cached.source.rotation,
-                               cached.linear_velocity, cached.angular_velocity, {}, real(0),
-                               start_time - cached.island_time, start.position, start.rotation);
-    }
+    CandidateBody(const CandidateCacheEntry& cached, const CandidatePose& start_pose)
+        : shape(cached.shape), start(start_pose), end(cached.end),
+          linear_velocity(cached.linear_velocity), angular_velocity(cached.angular_velocity),
+          configuration(cached.configuration), view(cached.view) {}
 };
 
 bool load_candidate(const WorldState& world, BodyHandle body, ShapeHandle shape,
@@ -78,18 +72,16 @@ bool load_candidate(const WorldState& world, BodyHandle body, ShapeHandle shape,
         return false;
     const auto island_id = world.body_pool.island_of(body);
     const Island* island = island_id ? world.island_pool.get(*island_id) : nullptr;
-    const bool frozen = island_id &&
-                        world.island_pool.frozen_until(*island_id) > world.schedule.time;
-    BodyConfigs::RegisterType registration;
-    if (!world.body_pool.get_register_type(body, registration) ||
-        (registration != BodyConfigs::RegisterType::ImmutableStatic && !island) ||
+    const bool frozen =
+        island_id && world.island_pool.frozen_until(*island_id) > world.schedule.time;
+    const auto registration = result.configuration.configs.register_type;
+    if ((registration != BodyConfigs::RegisterType::ImmutableStatic && !island) ||
         (island && island->time > world.interval.target_end && !frozen))
         return false;
     result.body = body;
     result.shape = shape;
     result.motion_version = versions[*dense_index];
-    result.island_time = frozen ? world.schedule.time
-                                : island ? island->time : world.schedule.time;
+    result.island_time = frozen ? world.schedule.time : island ? island->time : world.schedule.time;
     if (registration == BodyConfigs::RegisterType::ImmutableStatic || frozen) {
         result.linear_velocity = {};
         result.angular_velocity = real(0);
@@ -100,21 +92,20 @@ bool load_candidate(const WorldState& world, BodyHandle body, ShapeHandle shape,
                            result.angular_velocity, {}, real(0),
                            world.interval.target_end - result.island_time, result.end.position,
                            result.end.rotation);
+    result.frozen = frozen;
+    result.predicted_start = result.source;
+    result.predicted_start_time = result.island_time;
+    result.sweep_radius = result.view.sweep_radius();
+    result.dimensions_loaded = false;
     result.valid = true;
     return true;
 }
 
-CastChoice select_mode(const CandidateBody& body, const CcdSettings& settings) {
+CastChoice select_mode(const CandidateBody& body, const CcdSettings& settings,
+                       real linear_threshold_squared, real sweep_radius) {
     if ((body.shape.kind == ShapeKind::Circle && !settings.enable_circle) ||
         (body.shape.kind == ShapeKind::Polygon && !settings.enable_polygon))
         return CastChoice::None;
-
-    const real motion_threshold = settings.linear_start_threshold_m;
-    const real linear_threshold_squared = motion_threshold * motion_threshold;
-    const real linear_motion_squared = (body.end.position - body.start.position).length_squared();
-    const bool rotational_motion =
-        math::abs(body.end.rotation - body.start.rotation) * body.view.sweep_radius() >
-        motion_threshold;
 
     switch (body.configuration.configs.ccd_override) {
     case BodyConfigs::CcdOverride::Disabled:
@@ -123,8 +114,12 @@ CastChoice select_mode(const CandidateBody& body, const CcdSettings& settings) {
         return CastChoice::Cast;
 
     case BodyConfigs::CcdOverride::Auto:
-        if (rotational_motion || linear_motion_squared > linear_threshold_squared)
-            return CastChoice::Cast;
+        return math::abs(body.end.rotation - body.start.rotation) * sweep_radius >
+                           settings.linear_start_threshold_m ||
+                       (body.end.position - body.start.position).length_squared() >
+                           linear_threshold_squared
+                   ? CastChoice::Cast
+                   : CastChoice::None;
     }
     return CastChoice::None;
 }
@@ -134,9 +129,9 @@ bool overlaps(const CandidateBody& a, const CandidateBody& b, const CandidatePos
     if (!manifold && std::holds_alternative<ConvexPoly>(a.view.geometry()) &&
         std::holds_alternative<ConvexPoly>(b.view.geometry())) {
         PreparedPolygon prepared_a, prepared_b;
-        const SatHit hit = sat_depth_query(prepared_a.get(a.view), pose_a.position,
-                                           pose_a.rotation, prepared_b.get(b.view),
-                                           pose_b.position, pose_b.rotation);
+        const SatHit hit =
+            sat_depth_query(prepared_a.get(a.view), pose_a.position, pose_a.rotation,
+                            prepared_b.get(b.view), pose_b.position, pose_b.rotation);
         return hit.hit;
     }
     ContactManifold contact;
@@ -221,8 +216,8 @@ bool polygon_sweep_is_separated(const CandidateBody& fixed, const CandidateBody&
     const double moving_cos = std::cos(rotation);
     const double moving_sin = std::sin(rotation);
     const Vec2d moving_center(moving_polygon->center_offset());
-    const double scale = 1.0 + fixed_scale + fixed_center.length() + start.length() +
-                         end.length() + moving_center.length();
+    const double scale = 1.0 + fixed_scale + fixed_center.length() + start.length() + end.length() +
+                         moving_center.length();
     constexpr double rounding = 64.0 * std::numeric_limits<double>::epsilon();
 
     for (Vec2 vertex : moving_polygon->local) {
@@ -288,8 +283,8 @@ void defer_wall_contacts(WorldState& state, std::size_t first) {
         const detail::ShapeQueryView b(state.shape_pool, pair.shape_b);
         const auto& impact = output.toi_impacts[i];
         ContactManifold manifold;
-        if (!build_contacts_from_shape_pair(a, impact.position_a, impact.rotation_a,
-                                            b, impact.position_b, impact.rotation_b, manifold))
+        if (!build_contacts_from_shape_pair(a, impact.position_a, impact.rotation_a, b,
+                                            impact.position_b, impact.rotation_b, manifold))
             continue;
         const Vec2 relative_velocity = circle_a ? -motion.linear_velocity : motion.linear_velocity;
         if (math::dot(relative_velocity, manifold.normal) < -config::EPSILON &&
@@ -313,7 +308,7 @@ tick_t ceil_toi_time(tick_t start, tick_t end, real fraction) {
     return start + offset;
 }
 
-bool run_narrow_phase(WorldState& state) {
+template <bool cache_results> static bool run_narrow_phase_candidates(WorldState& state) {
     auto& output = state.narrow_phase;
     auto& pairs = state.pairs;
     auto& broad = state.broad_phase;
@@ -323,11 +318,6 @@ bool run_narrow_phase(WorldState& state) {
     if (!broad.reprepare_after_toi || output.pair_result_end != state.interval.target_end)
         previous_results.clear();
     next_results.clear();
-    const auto rigid_configs = state.body_pool.configs_column(BodyConfigs::Kind::Rigid);
-    const bool cache_results = broad.proxy_index_ready && !freeze_retry &&
-        std::any_of(rigid_configs.begin(), rigid_configs.end(), [](const BodyConfigs& config) {
-            return config.register_type != BodyConfigs::RegisterType::ImmutableStatic;
-        });
     std::size_t previous_result = 0;
     const bool reuse = freeze_retry && output.prepared_time == state.schedule.time &&
                        output.prepared_end == state.interval.target_end &&
@@ -357,13 +347,56 @@ bool run_narrow_phase(WorldState& state) {
             entry.epoch = 0;
         output.candidate_cache_epoch = 1;
     }
-    const auto cached_at = [&](u32 index) -> const CandidateCacheEntry& {
+    const auto cached_at = [&](u32 index) -> CandidateCacheEntry& {
         auto& entry = output.candidate_cache[index];
         if (entry.epoch != output.candidate_cache_epoch) {
             entry.epoch = output.candidate_cache_epoch;
             load_candidate(state, broad.bodies[index], broad.shapes[index], entry);
         }
         return entry;
+    };
+
+    const auto& ccd = state.settings.ccd;
+    const real linear_threshold_squared =
+        ccd.linear_start_threshold_m * ccd.linear_start_threshold_m;
+#ifdef SQP_ENABLE_PERFORMANCE_PROFILING
+    u64 dimensions_requested = 0, dimensions_loaded = 0;
+    u64 starts_predicted = 0, predictions_reused = 0;
+#endif
+    const auto start_at = [&](CandidateCacheEntry& entry, tick_t time) -> const CandidatePose& {
+        if (time == entry.island_time)
+            return entry.source;
+        if (time != entry.predicted_start_time) {
+            predict_body_state(entry.source.position, entry.source.rotation, entry.linear_velocity,
+                               entry.angular_velocity, {}, real(0), time - entry.island_time,
+                               entry.predicted_start.position, entry.predicted_start.rotation);
+            entry.predicted_start_time = time;
+#ifdef SQP_ENABLE_PERFORMANCE_PROFILING
+            ++starts_predicted;
+#endif
+        } else {
+#ifdef SQP_ENABLE_PERFORMANCE_PROFILING
+            ++predictions_reused;
+#endif
+        }
+        return entry.predicted_start;
+    };
+    const auto load_dimensions = [&](CandidateCacheEntry& entry) {
+#ifdef SQP_ENABLE_PERFORMANCE_PROFILING
+        ++dimensions_requested;
+#endif
+        if (entry.dimensions_loaded)
+            return true;
+        BodyProperties properties;
+        if (!state.body_pool.get_properties(entry.body, properties))
+            return false;
+        entry.radius = properties.radius;
+        entry.half_extents = properties.half_extents;
+        entry.dimensions_loaded = true;
+#ifdef SQP_ENABLE_PERFORMANCE_PROFILING
+        ++dimensions_loaded;
+#endif
+        return true;
     };
 
     const auto append_ordinary = [&](BroadPhase::Pair key, const Pair& pair,
@@ -377,7 +410,8 @@ bool run_narrow_phase(WorldState& state) {
     const auto was_updated = [&](u32 index) {
         return index < broad.selected.size() && broad.selected[index] == broad.selection_epoch;
     };
-    const auto append_toi = [&](const Pair& pair, const WorldState::NarrowPhaseData::SweepHit& hit) {
+    const auto append_toi = [&](const Pair& pair,
+                                const WorldState::NarrowPhaseData::SweepHit& hit) {
         output.toi_pairs.push_back(pair);
         output.toi_times.push_back(hit.time);
         output.toi_normals.push_back(hit.normal);
@@ -406,14 +440,12 @@ bool run_narrow_phase(WorldState& state) {
         if (body_a == body_b)
             continue;
 
-        const auto& cached_a = cached_at(candidate.a);
-        const auto& cached_b = cached_at(candidate.b);
+        auto& cached_a = cached_at(candidate.a);
+        auto& cached_b = cached_at(candidate.b);
         if (!cached_a.valid || !cached_b.valid)
             continue;
-        const auto id_a = state.body_pool.island_of(body_a);
-        const auto id_b = state.body_pool.island_of(body_b);
-        const bool frozen_a = id_a && state.island_pool.frozen_until(*id_a) > state.schedule.time;
-        const bool frozen_b = id_b && state.island_pool.frozen_until(*id_b) > state.schedule.time;
+        const bool frozen_a = cached_a.frozen;
+        const bool frozen_b = cached_b.frozen;
         if ((frozen_a && frozen_b) ||
             (frozen_a && cached_b.configuration.configs.register_type ==
                              BodyConfigs::RegisterType::ImmutableStatic) ||
@@ -423,16 +455,19 @@ bool run_narrow_phase(WorldState& state) {
 
         const tick_t start_time =
             std::max({cached_a.island_time, cached_b.island_time, state.schedule.time});
-        CandidateBody a(cached_a, start_time);
-        CandidateBody b(cached_b, start_time);
+        CandidateBody a(cached_a, start_at(cached_a, start_time));
+        CandidateBody b(cached_b, start_at(cached_b, start_time));
+        
         const Vec2 origin = a.start.position;
         const CandidatePose local_start_a{{}, a.start.rotation};
         const CandidatePose local_end_a{a.end.position - origin, a.end.rotation};
         const CandidatePose local_start_b{b.start.position - origin, b.start.rotation};
         const CandidatePose local_end_b{b.end.position - origin, b.end.rotation};
 
-        const CastChoice mode_a = select_mode(a, state.settings.ccd);
-        const CastChoice mode_b = select_mode(b, state.settings.ccd);
+        const CastChoice mode_a =
+            select_mode(a, ccd, linear_threshold_squared, cached_a.sweep_radius);
+        const CastChoice mode_b =
+            select_mode(b, ccd, linear_threshold_squared, cached_b.sweep_radius);
 
         const Pair pair{
             body_a, body_b, a.shape, b.shape, cached_a.motion_version, cached_b.motion_version};
@@ -440,11 +475,12 @@ bool run_narrow_phase(WorldState& state) {
         WorldState::NarrowPhaseData::PairResult* row = nullptr;
         constexpr auto immutable = BodyConfigs::RegisterType::ImmutableStatic;
         // Analytic LiteCircle and AABB casts are cheaper than recording their inputs.
-        if (cache_results && (!use_cast ||
-            (body_a.kind() == BodyConfigs::Kind::Rigid && a.shape.kind == ShapeKind::Polygon &&
-             a.configuration.configs.register_type != immutable) ||
-            (body_b.kind() == BodyConfigs::Kind::Rigid && b.shape.kind == ShapeKind::Polygon &&
-             b.configuration.configs.register_type != immutable))) {
+        if (cache_results &&
+            (!use_cast ||
+             (body_a.kind() == BodyConfigs::Kind::Rigid && a.shape.kind == ShapeKind::Polygon &&
+              a.configuration.configs.register_type != immutable) ||
+             (body_b.kind() == BodyConfigs::Kind::Rigid && b.shape.kind == ShapeKind::Polygon &&
+              b.configuration.configs.register_type != immutable))) {
             auto& entry = next_results.emplace_back();
             entry.candidate = candidate;
             entry.pair = pair;
@@ -453,10 +489,10 @@ bool run_narrow_phase(WorldState& state) {
             if (use_cast)
                 entry.start_time = start_time;
             if (use_cast) {
-                entry.motion = {a.end.position.x, a.end.position.y, a.end.rotation,
-                                b.end.position.x, b.end.position.y, b.end.rotation,
-                                a.start.position.x, a.start.position.y, a.start.rotation,
-                                b.start.position.x, b.start.position.y, b.start.rotation,
+                entry.motion = {a.end.position.x,    a.end.position.y,    a.end.rotation,
+                                b.end.position.x,    b.end.position.y,    b.end.rotation,
+                                a.start.position.x,  a.start.position.y,  a.start.rotation,
+                                b.start.position.x,  b.start.position.y,  b.start.rotation,
                                 a.linear_velocity.x, a.linear_velocity.y, a.angular_velocity,
                                 b.linear_velocity.x, b.linear_velocity.y, b.angular_velocity};
             } else {
@@ -472,17 +508,19 @@ bool run_narrow_phase(WorldState& state) {
                 if (prior.candidate == candidate && prior.pair == pair &&
                     prior.start_time == entry.start_time && prior.modes == entry.modes &&
                     prior.frozen == entry.frozen &&
-                    std::memcmp(prior.motion.data(), entry.motion.data(),
-                                sizeof(entry.motion)) == 0) {
+                    std::memcmp(prior.motion.data(), entry.motion.data(), sizeof(entry.motion)) ==
+                        0) {
                     entry.result = prior.result;
 #ifdef SQP_ENABLE_PERFORMANCE_PROFILING
                     ++state.stats.narrow_reused_results;
 #endif
-                    if (const auto* hit = std::get_if<WorldState::NarrowPhaseData::SweepHit>(&entry.result))
+                    if (const auto* hit =
+                            std::get_if<WorldState::NarrowPhaseData::SweepHit>(&entry.result))
                         append_toi(pair, *hit);
                     if (const auto* manifold = std::get_if<ContactManifold>(&entry.result);
                         manifold && !append_ordinary(candidate, pair, *manifold))
-                        return stage_error(state, "run_narrow_phase: failed to reuse ordinary contact");
+                        return stage_error(state,
+                                           "run_narrow_phase: failed to reuse ordinary contact");
                     continue;
                 }
             }
@@ -494,7 +532,8 @@ bool run_narrow_phase(WorldState& state) {
                 if (row)
                     row->result = manifold;
                 if (!append_ordinary(candidate, pair, manifold))
-                    return stage_error(state, "run_narrow_phase: failed to append ordinary contact");
+                    return stage_error(state,
+                                       "run_narrow_phase: failed to append ordinary contact");
             }
             continue;
         }
@@ -524,39 +563,38 @@ bool run_narrow_phase(WorldState& state) {
         bool hit = false;
         if ((box_a && box_b) || (box_a && circle_b) || (circle_a && box_b) || rectangle_a ||
             rectangle_b) {
-            BodyProperties properties_a, properties_b;
-            if (!state.body_pool.get_properties(body_a, properties_a) ||
-                !state.body_pool.get_properties(body_b, properties_b))
-                return stage_error(state, "run_narrow_phase: check failed (!state.body_pool.get_properties(body_a, properties_a) || !state.body_pool.get_properties(body_b, properties_b))");
+            if (!load_dimensions(cached_a) || !load_dimensions(cached_b))
+                return stage_error(state,
+                                   "run_narrow_phase: failed to load analytic sweep dimensions");
             if (box_a && box_b) {
                 hit = sweep_aabb_vs_aabb_toi(
-                    box_bounds(local_start_a.position, properties_a.half_extents),
-                    box_bounds(local_end_a.position, properties_a.half_extents),
-                    box_bounds(local_start_b.position, properties_b.half_extents),
-                    box_bounds(local_end_b.position, properties_b.half_extents), true, real(0),
+                    box_bounds(local_start_a.position, cached_a.half_extents),
+                    box_bounds(local_end_a.position, cached_a.half_extents),
+                    box_bounds(local_start_b.position, cached_b.half_extents),
+                    box_bounds(local_end_b.position, cached_b.half_extents), true, real(0),
                     fraction, normal);
             } else if (rectangle_a) {
                 hit = sweep_aabb_vs_aabb_toi(
                     rectangle_a0, rectangle_a1,
-                    box_bounds(local_start_b.position, properties_b.half_extents),
-                    box_bounds(local_end_b.position, properties_b.half_extents), true, real(0),
+                    box_bounds(local_start_b.position, cached_b.half_extents),
+                    box_bounds(local_end_b.position, cached_b.half_extents), true, real(0),
                     fraction, normal);
             } else if (rectangle_b) {
                 hit = sweep_aabb_vs_aabb_toi(
-                    box_bounds(local_start_a.position, properties_a.half_extents),
-                    box_bounds(local_end_a.position, properties_a.half_extents), rectangle_b0,
+                    box_bounds(local_start_a.position, cached_a.half_extents),
+                    box_bounds(local_end_a.position, cached_a.half_extents), rectangle_b0,
                     rectangle_b1, true, real(0), fraction, normal);
             } else if (circle_a) {
                 hit = sweep_circle_vs_aabb_toi(
-                    local_start_a.position, local_end_a.position, properties_a.radius,
-                    box_bounds(local_start_b.position, properties_b.half_extents),
-                    box_bounds(local_end_b.position, properties_b.half_extents), true, real(0),
+                    local_start_a.position, local_end_a.position, cached_a.radius,
+                    box_bounds(local_start_b.position, cached_b.half_extents),
+                    box_bounds(local_end_b.position, cached_b.half_extents), true, real(0),
                     fraction, normal);
             } else {
                 hit = sweep_circle_vs_aabb_toi(
-                    local_start_b.position, local_end_b.position, properties_b.radius,
-                    box_bounds(local_start_a.position, properties_a.half_extents),
-                    box_bounds(local_end_a.position, properties_a.half_extents), true, real(0),
+                    local_start_b.position, local_end_b.position, cached_b.radius,
+                    box_bounds(local_start_a.position, cached_a.half_extents),
+                    box_bounds(local_end_a.position, cached_a.half_extents), true, real(0),
                     fraction, normal);
                 normal = -normal;
             }
@@ -628,9 +666,8 @@ bool run_narrow_phase(WorldState& state) {
             constexpr auto fixed = BodyConfigs::RegisterType::ImmutableStatic;
             const bool fixed_a = a.configuration.configs.register_type == fixed;
             const bool fixed_b = b.configuration.configs.register_type == fixed;
-            if (fixed_a != fixed_b &&
-                (fixed_a ? polygon_sweep_is_separated(a, b, -normal)
-                         : polygon_sweep_is_separated(b, a, normal)))
+            if (fixed_a != fixed_b && (fixed_a ? polygon_sweep_is_separated(a, b, -normal)
+                                               : polygon_sweep_is_separated(b, a, normal)))
                 continue;
         }
 
@@ -641,14 +678,22 @@ bool run_narrow_phase(WorldState& state) {
         const auto impact_a = impact_pose(local_start_a, local_end_a);
         const auto impact_b = impact_pose(local_start_b, local_end_b);
 
-        const WorldState::NarrowPhaseData::SweepHit sweep{
-            toi_time, normal, {origin, impact_a.position, impact_b.position,
-                              impact_a.rotation, impact_b.rotation, true}};
+        const WorldState::NarrowPhaseData::SweepHit sweep{toi_time,
+                                                          normal,
+                                                          {origin, impact_a.position,
+                                                           impact_b.position, impact_a.rotation,
+                                                           impact_b.rotation, true}};
         if (row)
             row->result = sweep;
         append_toi(pair, sweep);
     }
 
+#ifdef SQP_ENABLE_PERFORMANCE_PROFILING
+    state.stats.narrow_dimension_requests += dimensions_requested;
+    state.stats.narrow_dimension_loads += dimensions_loaded;
+    state.stats.narrow_start_predictions += starts_predicted;
+    state.stats.narrow_reused_start_predictions += predictions_reused;
+#endif
     if (reuse) {
         pairs.delayed_pairs->clear();
         pairs.delayed_manifolds->clear();
@@ -668,6 +713,19 @@ bool run_narrow_phase(WorldState& state) {
     broad.candidates.clear();
 
     return true;
+}
+
+bool run_narrow_phase(WorldState& state) {
+    const auto& broad = state.broad_phase;
+    const bool freeze_retry = broad.freeze_retry;
+    const auto rigid_configs = state.body_pool.configs_column(BodyConfigs::Kind::Rigid);
+    const bool cache_results =
+        broad.proxy_index_ready && !freeze_retry &&
+        std::any_of(rigid_configs.begin(), rigid_configs.end(), [](const BodyConfigs& config) {
+            return config.register_type != BodyConfigs::RegisterType::ImmutableStatic;
+        });
+    return cache_results ? run_narrow_phase_candidates<true>(state)
+                         : run_narrow_phase_candidates<false>(state);
 }
 
 } // namespace sqp

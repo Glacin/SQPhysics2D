@@ -1106,6 +1106,74 @@ TEST_CASE("Ordinary boundary defers a penetrating LiteCircle wall contact once",
     }
 }
 
+TEST_CASE("Analytic candidates share dimensions and only reuse starts at the same time",
+          "[world][narrow_phase][toi]") {
+    using namespace sqp;
+    const bool reversed = GENERATE(false, true);
+    WorldState state;
+    state.interval.target_end = config::TU_PER_SECOND / 4;
+    state.schedule.time = config::TU_PER_SECOND / 32;
+    const auto early = state.island_pool.create();
+    const auto late = state.island_pool.create();
+    const auto late_time = config::TU_PER_SECOND / 16;
+    REQUIRE(state.island_pool.set_time(late, late_time));
+    const auto circle = add_lite_body(state, early, {-4, 0}, {16, 0}, false);
+    const auto first = add_lite_body(state, early, {}, {}, true);
+    const auto second = add_lite_body(state, early, {}, {}, true);
+    const auto third = add_lite_body(state, late, {}, {}, true);
+    const auto add_candidates = [&] {
+        for (const auto box : {first, second, third})
+            pair(state, reversed ? box : circle, reversed ? circle : box);
+    };
+
+    add_candidates();
+    REQUIRE(run_narrow_phase(state));
+    REQUIRE(state.narrow_phase.toi_times.size() == 3);
+    CHECK(state.narrow_phase.toi_times[0] == state.narrow_phase.toi_times[1]);
+    for (std::size_t i = 0; i < state.narrow_phase.toi_times.size(); ++i) {
+        const auto time = state.narrow_phase.toi_times[i];
+        CHECK(time >= config::TU_PER_SECOND / 8);
+        CHECK(time <= config::TU_PER_SECOND / 8 + 1);
+        CHECK(state.narrow_phase.toi_normals[i] == Vec2{reversed ? real(1) : real(-1), 0});
+        const auto& impact = state.narrow_phase.toi_impacts[i];
+        const Vec2 center = impact.origin + (reversed ? impact.position_b : impact.position_a);
+        CHECK(center.x == Catch::Approx(-2));
+    }
+    const auto& cached = state.narrow_phase.candidate_cache[circle];
+    CHECK(cached.predicted_start_time == late_time);
+    CHECK(cached.predicted_start.position == Vec2{-3, 0});
+#ifdef SQP_ENABLE_PERFORMANCE_PROFILING
+    CHECK(state.stats.narrow_dimension_requests == 6);
+    CHECK(state.stats.narrow_dimension_loads == 4);
+    CHECK(state.stats.narrow_start_predictions == 4);
+    CHECK(state.stats.narrow_reused_start_predictions == 1);
+#endif
+
+    clear_outputs(state);
+    REQUIRE(state.body_pool.set_velocity(state.broad_phase.bodies[circle], {-16, 0}, 0));
+    add_candidates();
+    REQUIRE(run_narrow_phase(state));
+    CHECK(state.narrow_phase.toi_times.empty());
+    CHECK(state.narrow_phase.candidate_cache[circle].predicted_start.position == Vec2{-5, 0});
+}
+
+TEST_CASE("Lightweight Auto uses the actual sweep displacement at the threshold",
+          "[world][narrow_phase][toi]") {
+    using namespace sqp;
+    const auto speed = GENERATE(real(0.875), real(1), real(1.125));
+    WorldState state;
+    state.settings.ccd.linear_start_threshold_m = real(0.5);
+    state.interval.target_end = config::TU_PER_SECOND / 2;
+    const auto island = state.island_pool.create();
+    const auto circle = add_lite_body(state, island, {real(-2.1875), 0}, {speed, 0}, false);
+    const auto box = add_lite_body(state, island, {}, {}, true);
+    pair(state, circle, box);
+    REQUIRE(run_narrow_phase(state));
+    const bool swept = speed > real(1);
+    CHECK(state.narrow_phase.toi_times.size() == (swept ? 1 : 0));
+    CHECK(state.pairs.pairs->size() == (swept ? 0 : 1));
+}
+
 TEST_CASE("Narrow phase reuses identical sweeps and recasts a shortened interval",
           "[world][narrow_phase][toi]") {
     using namespace sqp;
