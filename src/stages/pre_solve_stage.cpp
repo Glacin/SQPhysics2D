@@ -142,12 +142,12 @@ bool run_pre_solve(WorldState& state) {
     const std::size_t count = data.pairs->size();
     if (data.original_manifolds_valid && data.original_manifolds.size() != count)
         return stage_error(state, "run_pre_solve: check failed (data.original_manifolds_valid && data.original_manifolds.size() != count)");
-    auto& [manifolds, local_contacts, restitution, dynamic_friction, static_friction,
-           damping, frequency, correction_speed] = data.pre_solve_scratch;
+    auto& [manifolds, local_contacts, restitution, dynamic_friction, static_friction, damping,
+           frequency, correction_speed] = data.pre_solve_scratch;
     manifolds = *data.manifolds;
     local_contacts = data.toi_local_contacts;
-    for (auto* values : {&restitution, &dynamic_friction, &static_friction, &damping,
-                         &frequency, &correction_speed})
+    for (auto* values : {&restitution, &dynamic_friction, &static_friction, &damping, &frequency,
+                         &correction_speed})
         values->resize(count);
 
     for (std::size_t i = 0; i < count; ++i) {

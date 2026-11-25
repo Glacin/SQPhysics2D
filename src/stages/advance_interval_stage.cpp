@@ -79,7 +79,8 @@ bool run_advance_interval(WorldState& state) {
                 state.island_pool.toi_truncations(id) >=
                     state.settings.interval.max_truncations_per_tick &&
                 !freeze_island_until_next_tick(state, id, schedule.time, /*exhausted=*/true))
-                return stage_error(state, "run_advance_interval: failed to freeze exhausted island");
+                return stage_error(state,
+                                   "run_advance_interval: failed to freeze exhausted island");
         }
         clear_active_interval_data(state);
         state.pairs.pairs.swap(state.pairs.delayed_pairs);

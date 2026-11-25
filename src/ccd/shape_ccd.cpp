@@ -793,8 +793,7 @@ bool sweep_shape_pair_reentry_toi(const detail::ShapeQueryView& shape_a, Vec2 po
             std::clamp<u32>(static_cast<u32>(std::ceil(motion_bound / feature_span)), 64, 2048);
         real previous = upper;
         for (u32 sample = 1; sample <= samples; ++sample) {
-            const real candidate =
-                upper + (real(1) - upper) * real(sample) / real(samples);
+            const real candidate = upper + (real(1) - upper) * real(sample) / real(samples);
             Vec2 manifold_normal;
             if (sweep.overlaps(candidate, &manifold_normal)) {
                 real scan_lower = previous, hit = candidate;

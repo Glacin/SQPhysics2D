@@ -303,7 +303,8 @@ bool run_process_toi(WorldState& state, tick_t bound, bool& selected_time) {
         interval.islands.swap(interval.delayed_islands);
     };
     for (std::size_t i = 0; i < input.toi_pairs.size(); ++i) {
-        const bool duplicate = !output.toi_keys.insert({input.toi_times[i], input.toi_pairs[i]}).second;
+        const bool duplicate =
+            !output.toi_keys.insert({input.toi_times[i], input.toi_pairs[i]}).second;
 #ifdef SQP_ENABLE_PERFORMANCE_PROFILING
         ++state.stats.toi_dedup_checks;
         state.stats.toi_duplicates += duplicate;

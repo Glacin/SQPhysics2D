@@ -183,7 +183,10 @@ u64 hash_world_state(const WorldState& s) {
         h.add(v.normal); h.add(v.step_seconds); h.add(v.time); h.add(v.count);
     });
     sequence(h, s.solve.processed_islands, [&](const auto& v) {
-        h.add(v.id); h.add(v.start); h.add(v.end); h.add(v.received_toi_impulse);
+        h.add(v.id);
+        h.add(v.start);
+        h.add(v.end);
+        h.add(v.received_toi_impulse);
     });
     h.add(s.callbacks.pre_solve != nullptr); h.add(s.callbacks.post_solve != nullptr);
     h.add(s.callbacks.pre_data != nullptr); h.add(s.callbacks.post_data != nullptr);

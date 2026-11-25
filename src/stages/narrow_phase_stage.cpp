@@ -319,13 +319,14 @@ template <bool cache_results> static bool run_narrow_phase_candidates(WorldState
         previous_results.clear();
     next_results.clear();
     std::size_t previous_result = 0;
-    const bool reuse = freeze_retry && output.prepared_time == state.schedule.time &&
-                       output.prepared_end == state.interval.target_end &&
-                       output.ordinary_contact_keys.size() == pairs.pairs->size();
+    const bool reuse_ordinary_contacts = freeze_retry &&
+                                         output.prepared_time == state.schedule.time &&
+                                         output.prepared_end == state.interval.target_end &&
+                                         output.ordinary_contact_keys.size() == pairs.pairs->size();
 
     if (freeze_retry) {
         // No TOI is selected during a retry, so the delayed columns can hold the prior rows.
-        if (reuse) {
+        if (reuse_ordinary_contacts) {
             pairs.pairs.swap(pairs.delayed_pairs);
             pairs.manifolds.swap(pairs.delayed_manifolds);
             output.ordinary_contact_keys.swap(output.previous_contact_keys);
@@ -418,16 +419,16 @@ template <bool cache_results> static bool run_narrow_phase_candidates(WorldState
         output.toi_impacts.push_back(hit.impact);
     };
     const std::size_t first_toi = output.toi_times.size();
-    std::size_t previous_row = 0;
+    std::size_t previous_contact_row = 0;
     for (const BroadPhase::Pair candidate : broad.candidates) {
-        if (reuse && !was_updated(candidate.a) && !was_updated(candidate.b)) {
+        if (reuse_ordinary_contacts && !was_updated(candidate.a) && !was_updated(candidate.b)) {
             const auto& keys = output.previous_contact_keys;
-            while (previous_row < keys.size() && keys[previous_row] < candidate)
-                ++previous_row;
-            if (previous_row < keys.size() && keys[previous_row] == candidate &&
-                pairs.delayed_manifolds->counts[previous_row] != 0 &&
-                !append_ordinary(candidate, (*pairs.delayed_pairs)[previous_row],
-                                 pairs.delayed_manifolds->at(previous_row)))
+            while (previous_contact_row < keys.size() && keys[previous_contact_row] < candidate)
+                ++previous_contact_row;
+            if (previous_contact_row < keys.size() && keys[previous_contact_row] == candidate &&
+                pairs.delayed_manifolds->counts[previous_contact_row] != 0 &&
+                !append_ordinary(candidate, (*pairs.delayed_pairs)[previous_contact_row],
+                                 pairs.delayed_manifolds->at(previous_contact_row)))
                 return stage_error(state, "run_narrow_phase: failed to retain ordinary contact");
             continue;
         }
@@ -457,7 +458,7 @@ template <bool cache_results> static bool run_narrow_phase_candidates(WorldState
             std::max({cached_a.island_time, cached_b.island_time, state.schedule.time});
         CandidateBody a(cached_a, start_at(cached_a, start_time));
         CandidateBody b(cached_b, start_at(cached_b, start_time));
-        
+
         const Vec2 origin = a.start.position;
         const CandidatePose local_start_a{{}, a.start.rotation};
         const CandidatePose local_end_a{a.end.position - origin, a.end.rotation};
@@ -486,9 +487,8 @@ template <bool cache_results> static bool run_narrow_phase_candidates(WorldState
             entry.pair = pair;
             entry.modes = u8(mode_a == CastChoice::Cast) | (u8(mode_b == CastChoice::Cast) << 1);
             entry.frozen = u8(frozen_a) | (u8(frozen_b) << 1);
-            if (use_cast)
-                entry.start_time = start_time;
             if (use_cast) {
+                entry.start_time = start_time;
                 entry.motion = {a.end.position.x,    a.end.position.y,    a.end.rotation,
                                 b.end.position.x,    b.end.position.y,    b.end.rotation,
                                 a.start.position.x,  a.start.position.y,  a.start.rotation,
@@ -694,7 +694,7 @@ template <bool cache_results> static bool run_narrow_phase_candidates(WorldState
     state.stats.narrow_start_predictions += starts_predicted;
     state.stats.narrow_reused_start_predictions += predictions_reused;
 #endif
-    if (reuse) {
+    if (reuse_ordinary_contacts) {
         pairs.delayed_pairs->clear();
         pairs.delayed_manifolds->clear();
         output.previous_contact_keys.clear();

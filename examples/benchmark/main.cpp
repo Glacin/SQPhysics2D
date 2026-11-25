@@ -127,8 +127,7 @@ void print_freeze_stats(std::span<const sqp::WorldState::StageStats::BodyFreeze>
 void print_toi_stats(const sqp::WorldState::StageStats::ToiOutcomes& stats) {
     const auto print = [](const char* label, sqp::u64 effective, sqp::u64 total) {
         const double percent = total ? 100.0 * double(effective) / double(total) : 0;
-        std::printf("%s=%llu/%llu (%.4f%%)\n", label,
-                    static_cast<unsigned long long>(effective),
+        std::printf("%s=%llu/%llu (%.4f%%)\n", label, static_cast<unsigned long long>(effective),
                     static_cast<unsigned long long>(total), percent);
     };
     print("toi_effective_pairs", stats.effective_pairs, stats.selected_pairs);

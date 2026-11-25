@@ -457,7 +457,8 @@ struct WorldState {
         };
         // Persists independently of the interval's active and delayed pair columns.
         std::vector<ContactCacheEntry> contact_cache;
-        std::unordered_map<detail::ContactPairKey, std::size_t, detail::ContactPairHash> contact_cache_index;
+        std::unordered_map<detail::ContactPairKey, std::size_t, detail::ContactPairHash>
+            contact_cache_index;
         std::vector<std::size_t> constraint_cache_slots;
         struct ProcessedIsland {
             IslandId id;

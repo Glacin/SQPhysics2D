@@ -141,9 +141,8 @@ Result run(Scenario& scenario, const Options& options) {
 
     const tick_t measure_start = context.world.time_tu();
     auto body_freezes = std::move(context.state.stats.body_freezes);
-    std::erase_if(body_freezes, [measure_start](const auto& freeze) {
-        return freeze.end <= measure_start;
-    });
+    std::erase_if(body_freezes,
+                  [measure_start](const auto& freeze) { return freeze.end <= measure_start; });
     context.state.stats = {};
     context.state.stats.record_toi_outcomes = options.toi_stats;
     context.state.stats.record_body_freezes = options.freeze_stats;
@@ -220,7 +219,8 @@ Result run(Scenario& scenario, const Options& options) {
     result.total_step_ms = total_seconds * 1000.0;
     const tick_t measure_end = context.world.time_tu();
     auto& freezes = context.state.stats.body_freezes;
-    std::erase_if(freezes, [measure_end](const auto& freeze) { return freeze.start >= measure_end; });
+    std::erase_if(freezes,
+                  [measure_end](const auto& freeze) { return freeze.start >= measure_end; });
     for (auto& freeze : freezes) {
         freeze.start = std::max(freeze.start, measure_start);
         freeze.end = std::min(freeze.end, measure_end);

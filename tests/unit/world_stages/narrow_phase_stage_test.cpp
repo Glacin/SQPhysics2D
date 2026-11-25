@@ -868,25 +868,34 @@ TEST_CASE("A separating polygon overlap only schedules a later reentry",
         const BodyHandle body = apply(world.create_rigid(0, definition)).body;
         PolygonShapeDef shape_definition;
         shape_definition.vertices = vertices;
-        const ShapeHandle shape = apply(world.create_polygon_shape(0, shape_definition, body)).shape;
+        const ShapeHandle shape =
+            apply(world.create_polygon_shape(0, shape_definition, body)).shape;
         return std::pair{body, shape};
     };
 
     // A single shape pair captured from convex_polygon_bounce at the start of tick 25.
-    const auto [a, shape_a] = add_polygon(
-        {{real(106.711311), real(301.390808)}, real(3.90256667),
-         {real(-174.57962), real(66.1810532)}, real(35.22995)},
-        {{real(4.3065505), real(-0.884600282)}, {real(0.904233098), real(3.59282064)},
-         {real(-2.87375498), real(5.36477518)}, {real(-4.18250799), real(3.09694529)},
-         {real(-2.03651142), real(-1.5029496)}, {real(1.94825828), real(-4.97109175)},
-         {real(4.77118444), real(-4.69590044)}});
-    const auto [b, shape_b] = add_polygon(
-        {{real(97.5796509), real(302.865936)}, real(3.69407368),
-         {real(-64.4238129), real(2.88470459)}, real(49.70401)},
-        {{real(-0.164832965), real(2.81921315)}, {real(-3.76828098), real(1.68025732)},
-         {real(-4.53413677), real(-0.723966122)}, {real(-1.88569593), real(-2.58302855)},
-         {real(2.18271446), real(-2.49701762)}, {real(4.60749483), real(-0.530700028)},
-         {real(3.56273794), real(1.8352437)}});
+    const auto [a, shape_a] = add_polygon({{real(106.711311), real(301.390808)},
+                                           real(3.90256667),
+                                           {real(-174.57962), real(66.1810532)},
+                                           real(35.22995)},
+                                          {{real(4.3065505), real(-0.884600282)},
+                                           {real(0.904233098), real(3.59282064)},
+                                           {real(-2.87375498), real(5.36477518)},
+                                           {real(-4.18250799), real(3.09694529)},
+                                           {real(-2.03651142), real(-1.5029496)},
+                                           {real(1.94825828), real(-4.97109175)},
+                                           {real(4.77118444), real(-4.69590044)}});
+    const auto [b, shape_b] = add_polygon({{real(97.5796509), real(302.865936)},
+                                           real(3.69407368),
+                                           {real(-64.4238129), real(2.88470459)},
+                                           real(49.70401)},
+                                          {{real(-0.164832965), real(2.81921315)},
+                                           {real(-3.76828098), real(1.68025732)},
+                                           {real(-4.53413677), real(-0.723966122)},
+                                           {real(-1.88569593), real(-2.58302855)},
+                                           {real(2.18271446), real(-2.49701762)},
+                                           {real(4.60749483), real(-0.530700028)},
+                                           {real(3.56273794), real(1.8352437)}});
 
     SECTION("TOI is delayed until after separation") {
         clear_outputs(state);
@@ -936,9 +945,8 @@ TEST_CASE("Polygon CCD keeps real hits in the first time unit", "[world][narrow_
 
     RigidBodyDef wall;
     wall.configs.register_type = BodyConfigs::RegisterType::ImmutableStatic;
-    const auto fixed = add_test_polygon(state, {}, wall,
-                                        {{real(-0.5), -1}, {real(0.5), -1},
-                                         {real(0.5), 1}, {real(-0.5), 1}});
+    const auto fixed = add_test_polygon(
+        state, {}, wall, {{real(-0.5), -1}, {real(0.5), -1}, {real(0.5), 1}, {real(-0.5), 1}});
     RigidBodyDef moving;
     moving.position = {real(-0.75), 0};
     moving.linear_velocity = {travel_per_tu * real(config::TU_PER_SECOND), 0};
@@ -964,9 +972,9 @@ TEST_CASE("Rotating polygon keeps an interior hit against a static wall",
     RigidBodyDef wall;
     wall.configs.register_type = BodyConfigs::RegisterType::ImmutableStatic;
     const auto fixed = add_test_polygon(state, {}, wall, {{-8, -1}, {8, -1}, {8, 1}, {-8, 1}});
-    const auto blade = add_body(state, island, {0, real(2.5)}, {},
-                                BodyConfigs::CcdOverride::Shapecast, true, 0,
-                                math::PI * real(config::TICKS_PER_SECOND));
+    const auto blade =
+        add_body(state, island, {0, real(2.5)}, {}, BodyConfigs::CcdOverride::Shapecast, true, 0,
+                 math::PI * real(config::TICKS_PER_SECOND));
 
     pair(state, reversed ? blade : fixed, reversed ? fixed : blade);
     REQUIRE(run_narrow_phase(state));
@@ -987,22 +995,21 @@ TEST_CASE("Polygon CCD rejects a one-unit wall hit when the entire sweep separat
     RigidBodyDef wall;
     wall.position = {0, real(512.5)};
     wall.configs.register_type = BodyConfigs::RegisterType::ImmutableStatic;
-    const auto fixed = add_test_polygon(state, {}, wall,
-                                         {{-513, real(-0.5)}, {513, real(-0.5)},
-                                          {513, real(0.5)}, {-513, real(0.5)}});
+    const auto fixed = add_test_polygon(
+        state, {}, wall,
+        {{-513, real(-0.5)}, {513, real(-0.5)}, {513, real(0.5)}, {-513, real(0.5)}});
 
     // Wall 1 and rigid body 189 at the start of the repeating budget-64 sweep.
     RigidBodyDef moving({real(78.2668152), real(508.3951416015625)}, real(-71.4339371),
                         {real(-20.8869419), real(48.8508339)}, real(-39.7226753));
     moving.configs.ccd_override = BodyConfigs::CcdOverride::Shapecast;
     const Vec2 center{real(-7.52980611e-8), real(-1.42360406e-7)};
-    const auto body = add_test_polygon(
-        state, island, moving,
-        {center + Vec2{real(4.29351902), real(1.49808979)},
-         center + Vec2{real(-1.26991999), real(2.70342946)},
-         center + Vec2{real(-5.07837248), real(0.172721133)},
-         center + Vec2{real(-1.86868739), real(-2.59668136)},
-         center + Vec2{real(3.92346001), real(-1.77755892)}});
+    const auto body = add_test_polygon(state, island, moving,
+                                       {center + Vec2{real(4.29351902), real(1.49808979)},
+                                        center + Vec2{real(-1.26991999), real(2.70342946)},
+                                        center + Vec2{real(-5.07837248), real(0.172721133)},
+                                        center + Vec2{real(-1.86868739), real(-2.59668136)},
+                                        center + Vec2{real(3.92346001), real(-1.77755892)}});
 
     pair(state, reversed ? body : fixed, reversed ? fixed : body);
     REQUIRE(run_narrow_phase(state));
@@ -1015,7 +1022,16 @@ TEST_CASE("Ordinary boundary defers a penetrating LiteCircle wall contact once",
     using namespace sqp;
     constexpr tick_t boundary = 161546240;
     const bool reversed = GENERATE(false, true);
-    enum class Case { Closing, Separating, Resting, Touching, Frozen, Exhausted, NoTime, NoBoundary };
+    enum class Case {
+        Closing,
+        Separating,
+        Resting,
+        Touching,
+        Frozen,
+        Exhausted,
+        NoTime,
+        NoBoundary
+    };
     const Case condition = GENERATE(Case::Closing, Case::Separating, Case::Resting, Case::Touching,
                                     Case::Frozen, Case::Exhausted, Case::NoTime, Case::NoBoundary);
     WorldState state;
@@ -1036,17 +1052,17 @@ TEST_CASE("Ordinary boundary defers a penetrating LiteCircle wall contact once",
     RigidBodyDef wall;
     wall.configs.register_type = BodyConfigs::RegisterType::ImmutableStatic;
     wall.position = {0, real(-128.5)};
-    const auto fixed = add_test_polygon(state, {}, wall,
-                                       {{-129, real(-0.5)}, {129, real(-0.5)},
-                                        {129, real(0.5)}, {-129, real(0.5)}});
+    const auto fixed = add_test_polygon(
+        state, {}, wall,
+        {{-129, real(-0.5)}, {129, real(-0.5)}, {129, real(0.5)}, {-129, real(0.5)}});
     CircleShapeDef shape_definition;
     shape_definition.radius = condition == Case::Touching ? real(0.25) : real(0.241696537);
     const auto shape = state.shape_pool.add_circle(shape_definition);
     LiteCircleBodyDef definition;
     definition.configs.ccd_override = BodyConfigs::CcdOverride::Shapecast;
     definition.position = {real(119.994019), condition == Case::Touching
-                                                ? real(-128) + shape_definition.radius
-                                                : real(-127.928764)};
+                                                 ? real(-128) + shape_definition.radius
+                                                 : real(-127.928764)};
     definition.linear_velocity = {real(265.158997), real(-1880.67334)};
     if (condition == Case::Separating)
         definition.linear_velocity.y = -definition.linear_velocity.y;
@@ -1252,11 +1268,13 @@ TEST_CASE("A deferred wall TOI survives snapshots and yields to a same-time comm
     REQUIRE(world.process_selected_commands());
     PolygonShapeDef wall_shape;
     wall_shape.vertices = {{-4, -1}, {4, -1}, {4, 0}, {-4, 0}};
-    const auto wall_attachment = world.create_polygon_shape(0, wall_shape, take(wall_creation).body);
+    const auto wall_attachment =
+        world.create_polygon_shape(0, wall_shape, take(wall_creation).body);
     LiteCircleBodyDef circle_definition;
     circle_definition.position = {0, real(0.125)};
     circle_definition.linear_velocity = {0, -1000};
-    const auto circle_creation = world.create_lite_circle(0, circle_definition, take(circle_shape).shape);
+    const auto circle_creation =
+        world.create_lite_circle(0, circle_definition, take(circle_shape).shape);
     REQUIRE(world.process_selected_commands());
     take(wall_attachment);
     const auto body = take(circle_creation).body;

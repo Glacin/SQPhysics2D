@@ -43,8 +43,7 @@ struct ContactPairHash {
     }
 };
 
-template<class Contact>
-ContactPairKey contact_pair_key(const Contact& pair) {
+template <class Contact> ContactPairKey contact_pair_key(const Contact& pair) {
     return {pair.body_a, pair.body_b, pair.shape_a, pair.shape_b};
 }
 
