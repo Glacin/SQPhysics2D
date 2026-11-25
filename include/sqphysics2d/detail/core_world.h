@@ -383,6 +383,7 @@ struct WorldState {
         tick_t time = 0;
         tick_t step_target = 0;
         tick_t ordinary_target = 0;
+        std::optional<tick_t> last_ordinary_end;
         bool prepared = false;
     } schedule;
 

@@ -252,6 +252,54 @@ Vec2 circle_center_at(const CandidateBody& body, const CandidatePose& pose) {
     return pose.position + math::rotate_vector(body.view.local_center, pose.rotation);
 }
 
+// Only ordinary boundaries can leave a newly closing circle already inside a wall.
+void defer_wall_contacts(WorldState& state, std::size_t first) {
+    const tick_t now = state.schedule.time;
+    if (state.schedule.last_ordinary_end != now || now >= state.interval.target_end)
+        return;
+
+    auto& output = state.narrow_phase;
+    for (std::size_t i = first; i < output.toi_times.size(); ++i) {
+        // A positive sweep fraction is always rounded to a later time.
+        if (output.toi_times[i] != now)
+            continue;
+        const Pair& pair = output.toi_pairs[i];
+        const bool circle_a = pair.body_a.kind() == BodyConfigs::Kind::LiteCircle;
+        const bool circle_b = pair.body_b.kind() == BodyConfigs::Kind::LiteCircle;
+        if (circle_a == circle_b)
+            continue;
+        const BodyHandle circle = circle_a ? pair.body_a : pair.body_b;
+        const BodyHandle wall = circle_a ? pair.body_b : pair.body_a;
+        const ShapeHandle wall_shape = circle_a ? pair.shape_b : pair.shape_a;
+        BodyConfigs::RegisterType registration;
+        if (wall_shape.kind != ShapeKind::Polygon ||
+            !state.body_pool.get_register_type(wall, registration) ||
+            registration != BodyConfigs::RegisterType::ImmutableStatic)
+            continue;
+        const auto id = state.body_pool.island_of(circle);
+        const Island* island = id ? state.island_pool.get(*id) : nullptr;
+        BodyState motion;
+        if (!island || island->time != now || state.island_pool.frozen_until(*id) > now ||
+            !state.body_pool.get_state(circle, motion))
+            continue;
+
+        const detail::ShapeQueryView a(state.shape_pool, pair.shape_a);
+        const detail::ShapeQueryView b(state.shape_pool, pair.shape_b);
+        const auto& impact = output.toi_impacts[i];
+        ContactManifold manifold;
+        if (!build_contacts_from_shape_pair(a, impact.position_a, impact.rotation_a,
+                                            b, impact.position_b, impact.rotation_b, manifold))
+            continue;
+        const Vec2 relative_velocity = circle_a ? -motion.linear_velocity : motion.linear_velocity;
+        if (math::dot(relative_velocity, manifold.normal) < -config::EPSILON &&
+            std::any_of(manifold.points, manifold.points + manifold.count,
+                        [](const ContactPoint& point) { return point.depth > config::EPSILON; })) {
+            output.toi_times[i] = now + 1;
+            output.toi_normals[i] = -manifold.normal;
+        }
+    }
+}
+
 } // namespace
 
 tick_t ceil_toi_time(tick_t start, tick_t end, real fraction) {
@@ -317,6 +365,7 @@ bool run_narrow_phase(WorldState& state) {
     const auto was_updated = [&](u32 index) {
         return index < broad.selected.size() && broad.selected[index] == broad.selection_epoch;
     };
+    const std::size_t first_toi = output.toi_times.size();
     std::size_t previous_row = 0;
     for (const BroadPhase::Pair candidate : broad.candidates) {
         if (reuse && !was_updated(candidate.a) && !was_updated(candidate.b)) {
@@ -529,6 +578,7 @@ bool run_narrow_phase(WorldState& state) {
         pairs.delayed_manifolds->clear();
         output.previous_contact_keys.clear();
     }
+    defer_wall_contacts(state, first_toi);
     output.prepared_time = state.schedule.time;
     output.prepared_end = state.interval.target_end;
     if (freeze_retry) {

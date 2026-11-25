@@ -1009,3 +1009,163 @@ TEST_CASE("Polygon CCD rejects a one-unit wall hit when the entire sweep separat
     CHECK(state.narrow_phase.toi_times.empty());
     CHECK(state.pairs.pairs->empty());
 }
+
+TEST_CASE("Ordinary boundary defers a penetrating LiteCircle wall contact once",
+          "[world][narrow_phase][toi]") {
+    using namespace sqp;
+    constexpr tick_t boundary = 161546240;
+    const bool reversed = GENERATE(false, true);
+    enum class Case { Closing, Separating, Resting, Touching, Frozen, Exhausted, NoTime, NoBoundary };
+    const Case condition = GENERATE(Case::Closing, Case::Separating, Case::Resting, Case::Touching,
+                                    Case::Frozen, Case::Exhausted, Case::NoTime, Case::NoBoundary);
+    WorldState state;
+    state.settings.gravity = {};
+    const auto island = state.island_pool.create();
+    REQUIRE(state.island_pool.set_time(island, boundary));
+    state.interval.target_end = boundary;
+    REQUIRE(run_advance_interval(state));
+    CHECK(state.schedule.last_ordinary_end == boundary);
+    state.interval.target_end = condition == Case::NoTime ? boundary : boundary + 65536;
+    if (condition == Case::NoBoundary)
+        state.schedule.last_ordinary_end.reset();
+
+    PhysicsMaterial material;
+    material.base_restitution = 1;
+    material.restitution_flags = RESTITUTION_DISABLE_IMPACT_SCALING;
+    REQUIRE(state.shape_pool.materials().set(0, material));
+    RigidBodyDef wall;
+    wall.configs.register_type = BodyConfigs::RegisterType::ImmutableStatic;
+    wall.position = {0, real(-128.5)};
+    const auto fixed = add_test_polygon(state, {}, wall,
+                                       {{-129, real(-0.5)}, {129, real(-0.5)},
+                                        {129, real(0.5)}, {-129, real(0.5)}});
+    CircleShapeDef shape_definition;
+    shape_definition.radius = condition == Case::Touching ? real(0.25) : real(0.241696537);
+    const auto shape = state.shape_pool.add_circle(shape_definition);
+    LiteCircleBodyDef definition;
+    definition.configs.ccd_override = BodyConfigs::CcdOverride::Shapecast;
+    definition.position = {real(119.994019), condition == Case::Touching
+                                                ? real(-128) + shape_definition.radius
+                                                : real(-127.928764)};
+    definition.linear_velocity = {real(265.158997), real(-1880.67334)};
+    if (condition == Case::Separating)
+        definition.linear_velocity.y = -definition.linear_velocity.y;
+    if (condition == Case::Resting)
+        definition.linear_velocity = {};
+    const auto body = state.body_pool.add_lite_circle(definition, shape, state.shape_pool);
+    REQUIRE(is_valid(body));
+    REQUIRE(state.island_pool.add_body(island, body, state.body_pool));
+    const auto moving = static_cast<u32>(state.broad_phase.bodies.size());
+    state.broad_phase.bodies.push_back(body);
+    state.broad_phase.shapes.push_back(shape);
+    if (condition == Case::Frozen)
+        REQUIRE(freeze_island_until_next_tick(state, island, boundary));
+    if (condition == Case::Exhausted)
+        REQUIRE(state.island_pool.set_toi_truncations(
+            island, state.settings.interval.max_truncations_per_tick));
+
+    pair(state, reversed ? moving : fixed, reversed ? fixed : moving);
+    REQUIRE(run_narrow_phase(state));
+    const bool deferred = condition == Case::Closing || condition == Case::Exhausted;
+    const auto times = state.narrow_phase.toi_times;
+    CHECK(std::count(times.begin(), times.end(), boundary + 1) == (deferred ? 1 : 0));
+    if (deferred) {
+        REQUIRE(state.narrow_phase.toi_impacts.size() == 1);
+        const auto& impact = state.narrow_phase.toi_impacts.front();
+        CHECK((impact.origin + (reversed ? impact.position_a : impact.position_b)) ==
+              definition.position);
+    }
+
+    bool selected = false;
+    REQUIRE(run_process_toi(state, boundary, selected));
+    CHECK_FALSE(selected);
+    if (condition == Case::Closing) {
+        // Repreparing at the same time must preserve just one queued contact.
+        pair(state, reversed ? moving : fixed, reversed ? fixed : moving);
+        REQUIRE(run_narrow_phase(state));
+        REQUIRE(run_process_toi(state, boundary, selected));
+        CHECK_FALSE(selected);
+        REQUIRE(state.process_toi.toi_heap.size() == 1);
+    }
+    REQUIRE(run_process_toi(state, boundary + 1, selected));
+    CHECK(selected == (condition == Case::Closing));
+    if (selected) {
+        REQUIRE(state.pairs.pairs->size() == 1);
+        REQUIRE(run_pre_solve(state));
+        REQUIRE(run_solve(state));
+        BodyState result;
+        REQUIRE(state.body_pool.get_state(body, result));
+        CHECK(result.linear_velocity.y == Catch::Approx(real(1880.67334)));
+        CHECK(state.island_pool.toi_truncations(island) == 1);
+        REQUIRE(run_advance_interval(state));
+        CHECK(state.schedule.last_ordinary_end == boundary);
+        CHECK(state.schedule.time == boundary + 1);
+        pair(state, reversed ? moving : fixed, reversed ? fixed : moving);
+        REQUIRE(run_narrow_phase(state));
+        CHECK(state.narrow_phase.toi_times.empty());
+    }
+}
+
+TEST_CASE("A deferred wall TOI survives snapshots and yields to a same-time command",
+          "[world][step][toi]") {
+    using namespace sqp;
+    World world;
+    auto& state = world.state();
+    state.settings.gravity = {};
+    PhysicsMaterial material;
+    material.base_restitution = 1;
+    material.restitution_flags = RESTITUTION_DISABLE_IMPACT_SCALING;
+    REQUIRE(state.shape_pool.materials().set(0, material));
+
+    const auto take = [&](CommandId id) {
+        CommandResult result;
+        REQUIRE(world.take_command_result(id, result));
+        REQUIRE(result.status == CommandStatus::Applied);
+        return result;
+    };
+    RigidBodyDef wall;
+    wall.configs.register_type = BodyConfigs::RegisterType::ImmutableStatic;
+    const auto wall_creation = world.create_rigid(0, wall);
+    CircleShapeDef shape_definition;
+    shape_definition.radius = real(0.25);
+    const auto circle_shape = world.create_circle_shape(0, shape_definition);
+    REQUIRE(world.process_selected_commands());
+    PolygonShapeDef wall_shape;
+    wall_shape.vertices = {{-4, -1}, {4, -1}, {4, 0}, {-4, 0}};
+    const auto wall_attachment = world.create_polygon_shape(0, wall_shape, take(wall_creation).body);
+    LiteCircleBodyDef circle_definition;
+    circle_definition.position = {0, real(0.125)};
+    circle_definition.linear_velocity = {0, -1000};
+    const auto circle_creation = world.create_lite_circle(0, circle_definition, take(circle_shape).shape);
+    REQUIRE(world.process_selected_commands());
+    take(wall_attachment);
+    const auto body = take(circle_creation).body;
+    REQUIRE(run_advance_interval(state));
+    REQUIRE(world.step(0));
+    REQUIRE(state.process_toi.toi_heap.size() == 1);
+    CHECK(state.process_toi.toi_heap.front().time == 1);
+
+    WorldSnapshot snapshot;
+    REQUIRE(world.capture_snapshot(snapshot));
+    REQUIRE(world.step(1));
+    BodyState bounced;
+    REQUIRE(world.query().bodies().get_state(body, bounced));
+    CHECK(bounced.linear_velocity.y == Catch::Approx(real(1000)));
+
+    REQUIRE(world.restore_snapshot(snapshot));
+    REQUIRE(world.step(1));
+    BodyState resumed;
+    REQUIRE(world.query().bodies().get_state(body, resumed));
+    CHECK(resumed.position == bounced.position);
+    CHECK(resumed.linear_velocity == bounced.linear_velocity);
+
+    REQUIRE(world.restore_snapshot(snapshot));
+    const auto changed = world.set_body_velocity(1, body, {0, 10});
+    REQUIRE(world.step(1));
+    take(changed);
+    REQUIRE(world.query().bodies().get_state(body, resumed));
+    CHECK(resumed.linear_velocity.y == 10);
+    const auto island = world.state().body_pool.island_of(body);
+    REQUIRE(island);
+    CHECK(world.state().island_pool.toi_truncations(*island) == 0);
+}

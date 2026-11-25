@@ -120,6 +120,7 @@ bool run_advance_interval(WorldState& state) {
         return true;
     }
     schedule.time = interval.target_end;
+    schedule.last_ordinary_end = interval.target_end;
     if (interval.tick) {
         state.island_pool.reset_toi_truncations();
         std::vector<IslandId> ids;

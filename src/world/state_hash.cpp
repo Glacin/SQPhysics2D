@@ -171,6 +171,9 @@ u64 hash_world_state(const WorldState& s) {
     });
     h.add(s.schedule.time); h.add(s.schedule.step_target);
     h.add(s.schedule.ordinary_target); h.add(s.schedule.prepared);
+    h.add(s.schedule.last_ordinary_end.has_value());
+    if (s.schedule.last_ordinary_end)
+        h.add(*s.schedule.last_ordinary_end);
 
     sequence(h, s.solve.contact_cache, [&](const auto& v) {
         h.add(v.body_a); h.add(v.body_b); h.add(v.shape_a); h.add(v.shape_b);
